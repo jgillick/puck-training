@@ -25,7 +25,7 @@ def main() -> None:
         parser.error(f"Checkpoint does not exist: {args.checkpoint}")
     if not is_current_policy_checkpoint(args.checkpoint):
         parser.error(
-            "Checkpoint is not from the torque-only policy; "
+            "Checkpoint is not from the current MIT-mode policy; "
             "train a new checkpoint before evaluating"
         )
 

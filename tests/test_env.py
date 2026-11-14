@@ -24,26 +24,102 @@ class PuckStandEnvTests(unittest.TestCase):
     def setUp(self) -> None:
         self.observations, _ = self.env.reset()
 
-    def test_imports_all_actuators_and_maps_neutral_action_to_zero_torque(self) -> None:
+    def test_zero_action_uses_initial_mit_gains_and_midpoint_targets(self) -> None:
         self.assertEqual(self.env.actuator_manager.num_dofs, 8)
-        self.assertEqual(self.env.action_space.shape, (8,))
-        self.assertEqual(self.observations.shape, (2, 34))
+        self.assertEqual(self.env.action_space.shape, (10,))
+        self.assertEqual(self.observations.shape, (2, 36))
         self.assertTrue(torch.isfinite(self.observations).all())
 
-        zero_actions = torch.zeros((2, 8), device=gs.device)
+        zero_actions = torch.zeros((2, 10), device=gs.device)
         torques = self.env.action_manager.process_actions(zero_actions)
-        self.assertTrue(torch.equal(torques, zero_actions))
-
-    def test_actions_are_bounded_by_force_ranges_from_robot_model(self) -> None:
-        actions = torch.zeros((2, 8), device=gs.device)
-        actions[0] = 2.0
-        actions[1] = -2.0
-        torques = self.env.action_manager.process_actions(actions)
-        lower, upper = self.env.robot.get_dofs_force_range(
-            self.env.actuator_manager.dofs_idx
+        names = self.env.actuator_manager.dofs_names
+        limb_indices = [
+            names.index(name)
+            for name in (
+                "flexor_r",
+                "hip_r",
+                "knee_r",
+                "flexor_l",
+                "hip_l",
+                "knee_l",
+            )
+        ]
+        lower, upper = self.env.robot.get_dofs_limit(
+            self.env.action_manager.dofs_idx
         )
-        self.assertTrue(torch.allclose(torques[0], upper))
-        self.assertTrue(torch.allclose(torques[1], lower))
+        target_positions = (lower[limb_indices] + upper[limb_indices]) / 2.0
+        positions = self.env.actuator_manager.get_dofs_position()
+        velocities = self.env.actuator_manager.get_dofs_velocity()
+        expected = torch.zeros_like(torques)
+        expected[:, limb_indices] = (
+            5.0 * (target_positions - positions[:, limb_indices])
+            - velocities[:, limb_indices]
+        )
+        force_lower, force_upper = self.env.robot.get_dofs_force_range(
+            self.env.action_manager.dofs_idx
+        )
+        expected = torch.maximum(
+            torch.minimum(expected, force_upper), force_lower
+        )
+        self.assertTrue(torch.allclose(torques, expected))
+
+    def test_wheel_torque_actions_are_bounded_by_robot_model(self) -> None:
+        actions = torch.zeros((2, 10), device=gs.device)
+        actions[0, 8:10] = 2.0
+        actions[1, 8:10] = -2.0
+        torques = self.env.action_manager.process_actions(actions)
+        names = self.env.actuator_manager.dofs_names
+        wheel_indices = [names.index(name) for name in ("wheel_r", "wheel_l")]
+        lower, upper = self.env.robot.get_dofs_force_range(
+            self.env.action_manager.dofs_idx
+        )
+        self.assertTrue(
+            torch.allclose(torques[0, wheel_indices], upper[wheel_indices])
+        )
+        self.assertTrue(
+            torch.allclose(torques[1, wheel_indices], lower[wheel_indices])
+        )
+        self.assertTrue(torch.all(torques <= upper))
+        self.assertTrue(torch.all(torques >= lower))
+
+    def test_gain_actions_cover_zero_and_maximum_limb_gains(self) -> None:
+        actions = torch.zeros((2, 10), device=gs.device)
+        actions[:, 6:8] = -1.0
+        torques = self.env.action_manager.process_actions(actions)
+        self.assertTrue(torch.equal(torques, torch.zeros_like(torques)))
+
+        actions[:, 6:8] = 1.0
+        torques = self.env.action_manager.process_actions(actions)
+        names = self.env.actuator_manager.dofs_names
+        limb_indices = [
+            names.index(name)
+            for name in (
+                "flexor_r",
+                "hip_r",
+                "knee_r",
+                "flexor_l",
+                "hip_l",
+                "knee_l",
+            )
+        ]
+        lower, upper = self.env.robot.get_dofs_limit(
+            self.env.action_manager.dofs_idx
+        )
+        targets = (lower[limb_indices] + upper[limb_indices]) / 2.0
+        positions = self.env.actuator_manager.get_dofs_position()
+        velocities = self.env.actuator_manager.get_dofs_velocity()
+        expected = torch.zeros_like(torques)
+        expected[:, limb_indices] = (
+            20.0 * (targets - positions[:, limb_indices])
+            - 2.0 * velocities[:, limb_indices]
+        )
+        force_lower, force_upper = self.env.robot.get_dofs_force_range(
+            self.env.action_manager.dofs_idx
+        )
+        expected = torch.maximum(
+            torch.minimum(expected, force_upper), force_lower
+        )
+        self.assertTrue(torch.allclose(torques, expected))
 
     def test_leg_symmetry_uses_mirrored_signs_and_ignores_wheels(self) -> None:
         names = self.env.actuator_manager.dofs_names
@@ -117,9 +193,9 @@ class PuckStandEnvTests(unittest.TestCase):
         )
 
     def test_managed_step_returns_finite_rewards_and_observations(self) -> None:
-        actions = torch.zeros((2, 8), device=gs.device)
+        actions = torch.zeros((2, 10), device=gs.device)
         observations, rewards, terminated, truncated, _ = self.env.step(actions)
-        self.assertEqual(observations.shape, (2, 34))
+        self.assertEqual(observations.shape, (2, 36))
         self.assertTrue(torch.isfinite(observations).all())
         self.assertTrue(torch.isfinite(rewards).all())
         self.assertEqual(terminated.shape, (2,))

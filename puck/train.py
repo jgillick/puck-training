@@ -11,7 +11,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 from puck.env import PROJECT_ROOT, PuckStandEnv
 
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 
 
 class PuckRunner(OnPolicyRunner):
@@ -81,12 +81,12 @@ def main() -> None:
     parser.add_argument(
         "--resume",
         type=pathlib.Path,
-        help="Resume training from an RSL-RL checkpoint.",
+        help="Resume training from a current MIT-mode RSL-RL checkpoint.",
     )
     parser.add_argument(
         "--log-dir",
         type=pathlib.Path,
-        default=PROJECT_ROOT / "runs" / "forge" / "puck-torque",
+        default=PROJECT_ROOT / "runs" / "forge" / "puck-mit",
     )
     args = parser.parse_args()
     if args.num_envs <= 0 or args.iterations <= 0:
@@ -95,7 +95,7 @@ def main() -> None:
         parser.error(f"Checkpoint does not exist: {args.resume}")
     if args.resume is not None and not is_current_policy_checkpoint(args.resume):
         parser.error(
-            "Checkpoint is not from the torque-only policy; "
+            "Checkpoint is not from the current MIT-mode policy; "
             "train a new checkpoint before resuming"
         )
 

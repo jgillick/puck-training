@@ -25,6 +25,20 @@ INITIAL_ROOT_POSITION = (0.0, 0.0, 0.2)
 IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
 TARGET_BODY_HEIGHT = 0.5
 KNEE_DIRECTION_MARGIN = 0.2
+INITIAL_LIMB_KP = 5.0
+MIN_LIMB_KP = 0.0
+MAX_LIMB_KP = 20.0
+INITIAL_LIMB_KD = 1.0
+LIMB_KD_ACTION_RANGE = 1.0
+LIMB_JOINT_NAMES = (
+    "flexor_r",
+    "hip_r",
+    "knee_r",
+    "flexor_l",
+    "hip_l",
+    "knee_l",
+)
+WHEEL_JOINT_NAMES = ("wheel_r", "wheel_l")
 LEG_MIRROR_SIGNS = (
     ("hip_l", "hip_r", -1.0),
     ("knee_l", "knee_r", -1.0),
@@ -74,7 +88,7 @@ def _knee_direction_reward(
 
 
 class PuckActionManager(BaseActionManager):
-    """Map normalized policy actions to torque commands for every joint."""
+    """Apply MIT-style position/PD control to legs and torque control to wheels."""
 
     def __init__(
         self, env: ManagedEnvironment, actuator_manager: ActuatorManager
@@ -85,18 +99,74 @@ class PuckActionManager(BaseActionManager):
             actuator_joints=".*",
         )
 
+    @property
+    def num_actions(self) -> int:
+        return len(LIMB_JOINT_NAMES) + 2 + len(WHEEL_JOINT_NAMES)
+
     def build(self) -> None:
         super().build()
         self._force_lower, self._force_upper = self.env.robot.get_dofs_force_range(
             self.dofs_idx
         )
+        self._position_lower, self._position_upper = self.env.robot.get_dofs_limit(
+            self.dofs_idx
+        )
+        dof_names = list(self.dofs)
+        self._limb_indices = torch.tensor(
+            [dof_names.index(name) for name in LIMB_JOINT_NAMES],
+            device=gs.device,
+            dtype=torch.long,
+        )
+        self._wheel_indices = torch.tensor(
+            [dof_names.index(name) for name in WHEEL_JOINT_NAMES],
+            device=gs.device,
+            dtype=torch.long,
+        )
 
     def process_actions(self, actions: torch.Tensor) -> torch.Tensor:
         actions = actions.clamp(-1.0, 1.0)
-        return torch.where(
-            actions >= 0.0,
-            actions * self._force_upper,
-            actions * -self._force_lower,
+        limb_position_actions = actions[:, : len(LIMB_JOINT_NAMES)]
+        limb_targets = self._position_lower[self._limb_indices] + (
+            0.5
+            * (limb_position_actions + 1.0)
+            * (
+                self._position_upper[self._limb_indices]
+                - self._position_lower[self._limb_indices]
+            )
+        )
+        kp_action = actions[:, 6:7]
+        kp = INITIAL_LIMB_KP + torch.where(
+            kp_action >= 0.0,
+            kp_action * (MAX_LIMB_KP - INITIAL_LIMB_KP),
+            kp_action * (INITIAL_LIMB_KP - MIN_LIMB_KP),
+        )
+        kd = INITIAL_LIMB_KD + LIMB_KD_ACTION_RANGE * actions[:, 7:8]
+
+        positions = self.actuator_manager.get_dofs_position(
+            dofs_idx=self.dofs_idx
+        )
+        velocities = self.actuator_manager.get_dofs_velocity(
+            dofs_idx=self.dofs_idx
+        )
+        limb_torques = (
+            kp * (limb_targets - positions[:, self._limb_indices])
+            - kd * velocities[:, self._limb_indices]
+        )
+        wheel_actions = actions[:, 8:10]
+        wheel_lower = self._force_lower[self._wheel_indices]
+        wheel_upper = self._force_upper[self._wheel_indices]
+        wheel_torques = torch.where(
+            wheel_actions >= 0.0,
+            wheel_actions * wheel_upper,
+            wheel_actions * -wheel_lower,
+        )
+
+        torques = torch.zeros_like(positions)
+        torques[:, self._limb_indices] = limb_torques
+        torques[:, self._wheel_indices] = wheel_torques
+        return torch.maximum(
+            torch.minimum(torques, self._force_upper),
+            self._force_lower,
         )
 
     def send_actions_to_simulation(self, actions: torch.Tensor) -> None:
@@ -142,7 +212,7 @@ class PuckStandEnv(ManagedEnvironment):
         self._rest_dof_positions: torch.Tensor | None = None
 
     def config(self) -> None:
-        """Configure reset, torque actions, rewards, and observations."""
+        """Configure reset, MIT-style leg actions, rewards, and observations."""
         self.entity_manager = EntityManager(
             self,
             entity=self.robot,
