@@ -3,7 +3,11 @@ import unittest
 import genesis as gs
 import torch
 
-from puck.env import PuckStandEnv
+from puck.env import (
+    PuckStandEnv,
+    _knee_direction_reward,
+    _leg_symmetry_reward,
+)
 
 
 class PuckStandEnvTests(unittest.TestCase):
@@ -40,6 +44,41 @@ class PuckStandEnvTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(torques[0], upper))
         self.assertTrue(torch.allclose(torques[1], lower))
+
+    def test_leg_symmetry_uses_mirrored_signs_and_ignores_wheels(self) -> None:
+        names = self.env.actuator_manager.dofs_names
+        positions = torch.zeros((2, len(names)), device=gs.device)
+        paired_positions = {
+            "flexor_l": 0.2,
+            "flexor_r": 0.2,
+            "hip_l": -0.5,
+            "hip_r": 0.5,
+            "knee_l": -1.0,
+            "knee_r": 1.0,
+        }
+        for name, position in paired_positions.items():
+            positions[:, names.index(name)] = position
+        positions[:, names.index("wheel_l")] = 100.0
+        positions[:, names.index("wheel_r")] = -100.0
+
+        rewards = _leg_symmetry_reward(positions, names)
+        self.assertTrue(torch.allclose(rewards, torch.ones_like(rewards)))
+
+        positions[0, names.index("knee_l")] += 0.5
+        rewards = _leg_symmetry_reward(positions, names)
+        self.assertLess(float(rewards[0]), float(rewards[1]))
+
+    def test_knee_direction_reward_penalizes_reverse_bending(self) -> None:
+        names = self.env.actuator_manager.dofs_names
+        positions = torch.zeros((2, len(names)), device=gs.device)
+        positions[0, names.index("knee_r")] = 0.5
+        positions[0, names.index("knee_l")] = -0.5
+        positions[1, names.index("knee_r")] = -0.5
+        positions[1, names.index("knee_l")] = 0.5
+
+        rewards = _knee_direction_reward(positions, names)
+        self.assertAlmostEqual(float(rewards[0]), 0.0)
+        self.assertLess(float(rewards[1]), 0.0)
 
     def test_reset_restores_the_passively_settled_crouch(self) -> None:
         root_position = self.env._as_batch(self.env.robot.get_pos())

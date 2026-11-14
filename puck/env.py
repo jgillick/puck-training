@@ -24,6 +24,53 @@ BODY_CONTACT_GRACE_SEC = 0.75
 INITIAL_ROOT_POSITION = (0.0, 0.0, 0.2)
 IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
 TARGET_BODY_HEIGHT = 0.5
+KNEE_DIRECTION_MARGIN = 0.2
+LEG_MIRROR_SIGNS = (
+    ("hip_l", "hip_r", -1.0),
+    ("knee_l", "knee_r", -1.0),
+)
+
+
+def _leg_symmetry_reward(
+    joint_positions: torch.Tensor, dof_names: Sequence[str]
+) -> torch.Tensor:
+    dof_indices = {name: index for index, name in enumerate(dof_names)}
+    mirror_errors = torch.stack(
+        [
+            joint_positions[:, dof_indices[left_name]]
+            - sign * joint_positions[:, dof_indices[right_name]]
+            for left_name, right_name, sign in LEG_MIRROR_SIGNS
+        ],
+        dim=1,
+    )
+    return torch.exp(-mirror_errors.square().mean(dim=1))
+
+
+def _flexor_neutral_reward(
+    joint_positions: torch.Tensor, dof_names: Sequence[str]
+) -> torch.Tensor:
+    dof_indices = {name: index for index, name in enumerate(dof_names)}
+    flexor_positions = torch.stack(
+        [
+            joint_positions[:, dof_indices["flexor_l"]],
+            joint_positions[:, dof_indices["flexor_r"]],
+        ],
+        dim=1,
+    )
+    return torch.exp(-4.0 * flexor_positions.square().mean(dim=1))
+
+
+def _knee_direction_reward(
+    joint_positions: torch.Tensor, dof_names: Sequence[str]
+) -> torch.Tensor:
+    dof_indices = {name: index for index, name in enumerate(dof_names)}
+    right_knee = joint_positions[:, dof_indices["knee_r"]]
+    left_knee = joint_positions[:, dof_indices["knee_l"]]
+    wrong_direction = (
+        torch.relu(KNEE_DIRECTION_MARGIN - right_knee).square()
+        + torch.relu(KNEE_DIRECTION_MARGIN + left_knee).square()
+    )
+    return -wrong_direction
 
 
 class PuckActionManager(BaseActionManager):
@@ -115,6 +162,24 @@ class PuckStandEnv(ManagedEnvironment):
             height_error = self.entity_manager.base_pos[:, 2] - TARGET_BODY_HEIGHT
             return torch.exp(-4.0 * height_error.square())
 
+        def leg_symmetry_reward(env: ManagedEnvironment) -> torch.Tensor:
+            return _leg_symmetry_reward(
+                self.actuator_manager.get_dofs_position(),
+                self.actuator_manager.dofs_names,
+            )
+
+        def flexor_neutral_reward(env: ManagedEnvironment) -> torch.Tensor:
+            return _flexor_neutral_reward(
+                self.actuator_manager.get_dofs_position(),
+                self.actuator_manager.dofs_names,
+            )
+
+        def knee_direction_reward(env: ManagedEnvironment) -> torch.Tensor:
+            return _knee_direction_reward(
+                self.actuator_manager.get_dofs_position(),
+                self.actuator_manager.dofs_names,
+            )
+
         def wheel_support_reward(env: ManagedEnvironment) -> torch.Tensor:
             contacts = self.robot.get_contacts(with_entity=self.terrain, is_padded=True)
             link_ids = contacts["link_b"]
@@ -143,7 +208,13 @@ class PuckStandEnv(ManagedEnvironment):
         RewardManager(
             self,
             cfg={
-                "body_height": {"weight": 4.0, "fn": body_height_reward},
+                "body_height": {"weight": 10.0, "fn": body_height_reward},
+                "leg_symmetry": {"weight": 10.0, "fn": leg_symmetry_reward},
+                "flexor_neutral": {
+                    "weight": 8.0,
+                    "fn": flexor_neutral_reward,
+                },
+                "knee_direction": {"weight": 8.0, "fn": knee_direction_reward},
                 "wheel_support": {"weight": 1.0, "fn": wheel_support_reward},
                 "upright": {
                     "weight": -5.0,
