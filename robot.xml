@@ -64,7 +64,7 @@
               <inertial pos="-0 0 0.07005" mass="0.126" fullinertia="0.000159854 0.000159854 0.000300187 0 -0 -0"/>
               <!-- Part wheel -->
               <geom type="mesh" class="visual" pos="0 0 0" quat="0.40558 -0.579228 -0.40558 -0.579228" mesh="wheel" material="wheel_material"/>
-              <geom type="mesh" class="collision" pos="0 0 0" quat="0.40558 -0.579228 -0.40558 -0.579228" mesh="wheel" material="wheel_material"/>
+              <geom type="mesh" class="collision" pos="0 0 0" quat="0.40558 -0.579228 -0.40558 -0.579228" mesh="wheel" material="wheel_material" friction="1.2 0.005 0.0001"/>
             </body>
           </body>
         </body>
@@ -100,7 +100,7 @@
               <inertial pos="-0 -0 -0.07005" mass="0.126" fullinertia="0.000159854 0.000159854 0.000300187 -0 -0 -0"/>
               <!-- Part wheel_2 -->
               <geom type="mesh" class="visual" pos="0 -0 0" quat="0.56068 0.430857 0.56068 -0.430857" mesh="wheel" material="wheel_material"/>
-              <geom type="mesh" class="collision" pos="0 -0 0" quat="0.56068 0.430857 0.56068 -0.430857" mesh="wheel" material="wheel_material"/>
+              <geom type="mesh" class="collision" pos="0 -0 0" quat="0.56068 0.430857 0.56068 -0.430857" mesh="wheel" material="wheel_material" friction="1.2 0.005 0.0001"/>
             </body>
           </body>
         </body>
@@ -134,6 +134,35 @@
   <sensor>
     <accelerometer name="imu_accel" site="imu"/>
     <gyro name="imu_gyro" site="imu"/>
+
+    <!-- right leg actuator feedback sensors -->
+    <jointpos name="flexor_r_pos" joint="flexor_r"/>
+    <jointvel name="flexor_r_vel" joint="flexor_r"/>
+    <jointactuatorfrc name="flexor_r_torque" joint="flexor_r"/>
+    <jointpos name="hip_r_pos" joint="hip_r"/>
+    <jointvel name="hip_r_vel" joint="hip_r"/>
+    <jointactuatorfrc name="hip_r_torque" joint="hip_r"/>
+    <jointpos name="knee_r_pos" joint="knee_r"/>
+    <jointvel name="knee_r_vel" joint="knee_r"/>
+    <jointactuatorfrc name="knee_r_torque" joint="knee_r"/>
+    <jointpos name="wheel_r_pos" joint="wheel_r"/>
+    <jointvel name="wheel_r_vel" joint="wheel_r"/>
+    <jointactuatorfrc name="wheel_r_torque" joint="wheel_r"/>
+
+    <!-- left leg actuator feedback sensors -->
+    <jointpos name="flexor_l_pos" joint="flexor_l"/>
+    <jointvel name="flexor_l_vel" joint="flexor_l"/>
+    <jointactuatorfrc name="flexor_l_torque" joint="flexor_l"/>
+    <jointpos name="hip_l_pos" joint="hip_l"/>
+    <jointvel name="hip_l_vel" joint="hip_l"/>
+    <jointactuatorfrc name="hip_l_torque" joint="hip_l"/>
+    <jointpos name="knee_l_pos" joint="knee_l"/>
+    <jointvel name="knee_l_vel" joint="knee_l"/>
+    <jointactuatorfrc name="knee_l_torque" joint="knee_l"/>
+    <jointpos name="wheel_l_pos" joint="wheel_l"/>
+    <jointvel name="wheel_l_vel" joint="wheel_l"/>
+    <jointactuatorfrc name="wheel_l_torque" joint="wheel_l"/>
+
   </sensor>
   <equality/>
 </mujoco>
