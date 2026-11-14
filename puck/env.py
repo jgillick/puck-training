@@ -1,6 +1,5 @@
 """Genesis Forge environment for teaching Puck to stand and balance."""
 
-import math
 import pathlib
 from collections.abc import Sequence
 
@@ -21,26 +20,14 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
 CONTROL_DT = 1 / 50
 REST_SETTLE_STEPS = 250
+BODY_CONTACT_GRACE_SEC = 0.75
 INITIAL_ROOT_POSITION = (0.0, 0.0, 0.2)
 IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
-STAND_HEIGHT = 0.5
-
-STAND_POSE = {
-    "flexor_l": 0.0,
-    "flexor_r": 0.0,
-    "hip_l": -math.pi * STAND_HEIGHT / 2,
-    "hip_r": math.pi * STAND_HEIGHT / 2,
-    "knee_l": -math.pi * STAND_HEIGHT,
-    "knee_r": math.pi * STAND_HEIGHT,
-    "wheel_l": 0.0,
-    "wheel_r": 0.0,
-}
+TARGET_BODY_HEIGHT = 0.5
 
 
 class PuckActionManager(BaseActionManager):
-    """Position-control the legs and apply policy torques to the wheels."""
-
-    wheel_torque_limit = 12.0
+    """Map normalized policy actions to torque commands for every joint."""
 
     def __init__(
         self, env: ManagedEnvironment, actuator_manager: ActuatorManager
@@ -53,70 +40,27 @@ class PuckActionManager(BaseActionManager):
 
     def build(self) -> None:
         super().build()
-        names = tuple(self._dofs)
-        self._position_action_indices = torch.tensor(
-            [i for i, name in enumerate(names) if not name.startswith("wheel_")],
-            device=gs.device,
-        )
-        self._wheel_action_indices = torch.tensor(
-            [i for i, name in enumerate(names) if name.startswith("wheel_")],
-            device=gs.device,
-        )
-        self.position_dofs_idx = [
-            self.dofs_idx[i] for i in self._position_action_indices.tolist()
-        ]
-        self.wheel_dofs_idx = [
-            self.dofs_idx[i] for i in self._wheel_action_indices.tolist()
-        ]
-        scale_by_joint = {
-            "flexor": 0.3,
-            "hip": 0.6,
-            "knee": 1.0,
-        }
-        self._position_scale = torch.tensor(
-            [
-                scale_by_joint[name.split("_", maxsplit=1)[0]]
-                for name in names
-                if not name.startswith("wheel_")
-            ],
-            device=gs.device,
-        )
-        lower, upper = self.actuator_manager.get_dofs_limits(self.dofs_idx)
-        self._position_lower = lower[self._position_action_indices]
-        self._position_upper = upper[self._position_action_indices]
-        self._position_default = self.actuator_manager.default_dofs_pos[
-            :, self._position_action_indices
-        ].clamp(
-            min=self._position_lower,
-            max=self._position_upper,
+        self._force_lower, self._force_upper = self.env.robot.get_dofs_force_range(
+            self.dofs_idx
         )
 
     def process_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        targets = torch.zeros_like(actions)
-        positions = (
-            self._position_default
-            + actions[:, self._position_action_indices] * self._position_scale
+        actions = actions.clamp(-1.0, 1.0)
+        return torch.where(
+            actions >= 0.0,
+            actions * self._force_upper,
+            actions * -self._force_lower,
         )
-        targets[:, self._position_action_indices] = torch.maximum(
-            torch.minimum(positions, self._position_upper), self._position_lower
-        )
-        targets[:, self._wheel_action_indices] = (
-            actions[:, self._wheel_action_indices].clamp(-1.0, 1.0)
-            * self.wheel_torque_limit
-        )
-        return targets
 
     def send_actions_to_simulation(self, actions: torch.Tensor) -> None:
-        self.actuator_manager.control_dofs_position(
-            actions[:, self._position_action_indices], self.position_dofs_idx
-        )
         self.env.robot.control_dofs_force(
-            actions[:, self._wheel_action_indices], self.wheel_dofs_idx
+            actions,
+            self.dofs_idx,
         )
 
 
 class PuckStandEnv(ManagedEnvironment):
-    """Train a position-controlled policy to raise Puck from its resting crouch."""
+    """Train a torque-controlled policy to stand Puck up and balance."""
 
     def __init__(
         self,
@@ -151,7 +95,7 @@ class PuckStandEnv(ManagedEnvironment):
         self._rest_dof_positions: torch.Tensor | None = None
 
     def config(self) -> None:
-        """Configure the reset, position control, reward, and observation managers."""
+        """Configure reset, torque actions, rewards, and observations."""
         self.entity_manager = EntityManager(
             self,
             entity=self.robot,
@@ -164,44 +108,17 @@ class PuckStandEnv(ManagedEnvironment):
                 }
             },
         )
-        self.actuator_manager = ActuatorManager(
-            self,
-            joint_names=".*",
-            default_pos=STAND_POSE,
-            kp={
-                "flexor_.*": 10.0,
-                "hip_.*": 18.0,
-                "knee_.*": 18.0,
-                "wheel_.*": 0.0,
-            },
-            kv={
-                "flexor_.*": 0.5,
-                "hip_.*": 0.8,
-                "knee_.*": 0.8,
-                "wheel_.*": 0.0,
-            },
-            max_force={
-                "flexor_.*": 6.0,
-                "hip_.*": 6.0,
-                "knee_.*": 12.0,
-                "wheel_.*": 12.0,
-            },
-        )
+        self.actuator_manager = ActuatorManager(self, joint_names=".*")
         self.action_manager = PuckActionManager(self, self.actuator_manager)
 
-        def stand_pose_reward(env: ManagedEnvironment) -> torch.Tensor:
-            position_error = self.actuator_manager.get_dofs_position()[
-                :, self.action_manager._position_action_indices
-            ] - self.action_manager._position_default
-            return torch.exp(-4.0 * position_error.square().mean(dim=1))
+        def body_height_reward(env: ManagedEnvironment) -> torch.Tensor:
+            height_error = self.entity_manager.base_pos[:, 2] - TARGET_BODY_HEIGHT
+            return torch.exp(-4.0 * height_error.square())
 
         def wheel_support_reward(env: ManagedEnvironment) -> torch.Tensor:
             contacts = self.robot.get_contacts(with_entity=self.terrain, is_padded=True)
             link_ids = contacts["link_b"]
             valid = contacts["valid_mask"]
-            body_contact = (
-                (link_ids == self.robot.get_link("body").idx) & valid
-            ).any(dim=1)
             wheel_ids = torch.tensor(
                 [
                     self.robot.get_link("wheel").idx,
@@ -211,14 +128,23 @@ class PuckStandEnv(ManagedEnvironment):
             )
             wheel_contact = (
                 (link_ids.unsqueeze(-1) == wheel_ids) & valid.unsqueeze(-1)
-            ).any(dim=1).any(dim=1)
-            return wheel_contact.float() - body_contact.float()
+            ).any(dim=1)
+            return wheel_contact.float().mean(dim=1)
+
+        def body_contact_failure(env: ManagedEnvironment) -> torch.Tensor:
+            contacts = self.robot.get_contacts(with_entity=self.terrain, is_padded=True)
+            body_id = self.robot.get_link("body").idx
+            body_contact = (
+                (contacts["link_b"] == body_id) & contacts["valid_mask"]
+            ).any(dim=1)
+            grace_steps = round(BODY_CONTACT_GRACE_SEC / self.dt)
+            return (env.episode_length > grace_steps) & body_contact
 
         RewardManager(
             self,
             cfg={
-                "stand_pose": {"weight": 4.0, "fn": stand_pose_reward},
-                "wheel_support": {"weight": 2.0, "fn": wheel_support_reward},
+                "body_height": {"weight": 4.0, "fn": body_height_reward},
+                "wheel_support": {"weight": 1.0, "fn": wheel_support_reward},
                 "upright": {
                     "weight": -5.0,
                     "fn": rewards.flat_orientation_l2(
@@ -245,6 +171,7 @@ class PuckStandEnv(ManagedEnvironment):
             self,
             term_cfg={
                 "timeout": {"fn": terminations.timeout(), "time_out": True},
+                "body_contact": {"fn": body_contact_failure},
                 "bad_orientation": {
                     "fn": terminations.bad_orientation(
                         limit_angle=75,
@@ -271,10 +198,9 @@ class PuckStandEnv(ManagedEnvironment):
                     "clip": (-20.0, 20.0),
                     "units": "m/s",
                 },
-                "joint_position_error": {
+                "joint_position": {
                     "fn": lambda env: (
                         self.actuator_manager.get_dofs_position()
-                        - self.actuator_manager.default_dofs_pos
                     ),
                     "clip": (-10.0, 10.0),
                     "units": "rad",
@@ -308,9 +234,9 @@ class PuckStandEnv(ManagedEnvironment):
         self._rest_dof_positions = self.actuator_manager.get_dofs_position().clone()
         self.entity_manager.step()
 
-        if self.actuator_manager.num_dofs != len(STAND_POSE):
+        if self.actuator_manager.num_dofs != 8:
             raise ValueError(
-                f"Expected {len(STAND_POSE)} actuated joints, "
+                "Expected 8 actuated joints, "
                 f"found {self.actuator_manager.num_dofs}: "
                 f"{self.actuator_manager.dofs_names}"
             )

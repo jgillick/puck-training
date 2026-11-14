@@ -11,6 +11,26 @@ from rsl_rl.runners import OnPolicyRunner
 
 from puck.env import PROJECT_ROOT, PuckStandEnv
 
+POLICY_VERSION = 1
+
+
+class PuckRunner(OnPolicyRunner):
+    """Tag saved checkpoints so incompatible action semantics cannot be resumed."""
+
+    def save(self, path: str, infos: dict | None = None) -> None:
+        checkpoint_info = dict(infos or {})
+        checkpoint_info["puck_policy_version"] = POLICY_VERSION
+        super().save(path, checkpoint_info)
+
+
+def is_current_policy_checkpoint(path: pathlib.Path) -> bool:
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint_info = checkpoint.get("infos")
+    return (
+        isinstance(checkpoint_info, dict)
+        and checkpoint_info.get("puck_policy_version") == POLICY_VERSION
+    )
+
 
 def training_config(seed: int = 0) -> dict:
     return {
@@ -59,13 +79,25 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument(
+        "--resume",
+        type=pathlib.Path,
+        help="Resume training from an RSL-RL checkpoint.",
+    )
+    parser.add_argument(
         "--log-dir",
         type=pathlib.Path,
-        default=PROJECT_ROOT / "runs" / "forge" / "puck-stand",
+        default=PROJECT_ROOT / "runs" / "forge" / "puck-torque",
     )
     args = parser.parse_args()
     if args.num_envs <= 0 or args.iterations <= 0:
         parser.error("--num-envs and --iterations must be positive")
+    if args.resume is not None and not args.resume.is_file():
+        parser.error(f"Checkpoint does not exist: {args.resume}")
+    if args.resume is not None and not is_current_policy_checkpoint(args.resume):
+        parser.error(
+            "Checkpoint is not from the torque-only policy; "
+            "train a new checkpoint before resuming"
+        )
 
     if args.device == "cpu":
         torch.set_default_device("cpu")
@@ -79,12 +111,16 @@ def main() -> None:
     try:
         env.build()
         env.reset()
-        runner = OnPolicyRunner(
+        runner = PuckRunner(
             env,
             copy.deepcopy(training_config(args.seed)),
             str(args.log_dir),
             device=gs.device,
         )
+        if args.resume is not None:
+            runner.load(str(args.resume))
+            runner.current_learning_iteration += 1
+            print(f"Resuming training from {args.resume}")
         runner.learn(
             num_learning_iterations=args.iterations,
             init_at_random_ep_len=False,

@@ -9,7 +9,7 @@ from genesis_forge.wrappers import RslRlWrapper
 from rsl_rl.runners import OnPolicyRunner
 
 from puck.env import PuckStandEnv
-from puck.train import training_config
+from puck.train import is_current_policy_checkpoint, training_config
 
 
 def main() -> None:
@@ -23,6 +23,11 @@ def main() -> None:
         parser.error("--episodes must be positive")
     if not args.checkpoint.is_file():
         parser.error(f"Checkpoint does not exist: {args.checkpoint}")
+    if not is_current_policy_checkpoint(args.checkpoint):
+        parser.error(
+            "Checkpoint is not from the torque-only policy; "
+            "train a new checkpoint before evaluating"
+        )
 
     if args.device == "cpu":
         torch.set_default_device("cpu")

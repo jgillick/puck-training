@@ -11,11 +11,12 @@ Puck is an 8DOF bipedal wheeled robot project. This is my attempt to train an RL
 - Get `uv`: `brew install uv` or `pip install uv`
 - `uv sync` to install dependencies
 - `uv run python -m puck.train --num-envs 64 --iterations 500` trains a policy
-- Evaluate a checkpoint with `uv run python -m puck.evaluate runs/forge/puck-stand/model_500.pt --render`
+- Resume for 500 more iterations with `uv run python -m puck.train --num-envs 64 --iterations 500 --resume runs/forge/puck-torque/model_499.pt`
+- Evaluate and render a checkpoint with `uv run python -m puck.evaluate runs/forge/puck-torque/model_499.pt --render`
 
 ## Training environment
 
-The Genesis Forge environment imports `robot.xml` and builds the ground plane in Genesis. At startup it passively simulates the crouched, unpowered robot settling onto the floor, then resets each episode to that saved multi-contact pose. The policy's neutral action commands the classical controller's half-extension leg pose (`height=0.5`). Fixed-gain position control drives the six leg joints, while bounded torque actions on the two wheels let the policy balance without fighting wheel-position setpoints.
+The Genesis Forge environment imports `robot.xml` and builds the ground plane in Genesis. At startup it passively simulates the crouched, unpowered robot settling onto the floor, then resets each episode to that saved multi-contact pose. The policy outputs normalized torques for all eight joints; torque bounds, joint limits, and other joint properties come from `robot.xml`. Rewards favor an upright body near 0.5 m high and wheel support while allowing brief wheel lift-offs. Sustained body contact after a short grace period ends the episode. Checkpoints can be resumed with `--resume`; the iteration count is the number of additional iterations to run. The older position-control checkpoints are incompatible with this torque policy, so start a fresh run in the new `puck-torque` log directory before resuming or evaluating its checkpoints.
 
 ## About the robot
 

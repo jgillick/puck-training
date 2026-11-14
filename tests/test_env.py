@@ -3,7 +3,7 @@ import unittest
 import genesis as gs
 import torch
 
-from puck.env import STAND_HEIGHT, STAND_POSE, PuckStandEnv
+from puck.env import PuckStandEnv
 
 
 class PuckStandEnvTests(unittest.TestCase):
@@ -20,40 +20,26 @@ class PuckStandEnvTests(unittest.TestCase):
     def setUp(self) -> None:
         self.observations, _ = self.env.reset()
 
-    def test_imports_all_actuators_and_maps_neutral_action_to_stand_pose(self) -> None:
+    def test_imports_all_actuators_and_maps_neutral_action_to_zero_torque(self) -> None:
         self.assertEqual(self.env.actuator_manager.num_dofs, 8)
         self.assertEqual(self.env.action_space.shape, (8,))
         self.assertEqual(self.observations.shape, (2, 34))
         self.assertTrue(torch.isfinite(self.observations).all())
 
         zero_actions = torch.zeros((2, 8), device=gs.device)
-        targets = self.env.action_manager.process_actions(zero_actions)
-        lower, upper = self.env.actuator_manager.get_dofs_limits(
-            self.env.action_manager.dofs_idx
-        )
-        for name, position in STAND_POSE.items():
-            index = self.env.actuator_manager.dofs_names.index(name)
-            expected = min(max(position, float(lower[index])), float(upper[index]))
-            if name.startswith("wheel_"):
-                expected = 0.0
-            self.assertAlmostEqual(float(targets[0, index]), expected)
-        self.assertAlmostEqual(STAND_HEIGHT, 0.5)
+        torques = self.env.action_manager.process_actions(zero_actions)
+        self.assertTrue(torch.equal(torques, zero_actions))
 
-    def test_wheel_actions_are_bounded_torque_commands(self) -> None:
+    def test_actions_are_bounded_by_force_ranges_from_robot_model(self) -> None:
         actions = torch.zeros((2, 8), device=gs.device)
-        wheel_indices = self.env.action_manager._wheel_action_indices
-        actions[:, wheel_indices[0]] = 2.0
-        actions[:, wheel_indices[1]] = -2.0
-
-        targets = self.env.action_manager.process_actions(actions)
-        self.assertTrue(
-            torch.allclose(
-                targets[:, wheel_indices],
-                torch.tensor(
-                    [[12.0, -12.0], [12.0, -12.0]], device=gs.device
-                ),
-            )
+        actions[0] = 2.0
+        actions[1] = -2.0
+        torques = self.env.action_manager.process_actions(actions)
+        lower, upper = self.env.robot.get_dofs_force_range(
+            self.env.actuator_manager.dofs_idx
         )
+        self.assertTrue(torch.allclose(torques[0], upper))
+        self.assertTrue(torch.allclose(torques[1], lower))
 
     def test_reset_restores_the_passively_settled_crouch(self) -> None:
         root_position = self.env._as_batch(self.env.robot.get_pos())
