@@ -1,5 +1,5 @@
-"""MuJoCo environments and tools for the Puck robot."""
+"""Genesis Forge environments and tools for the Puck robot."""
 
-from puck.env import PuckBalanceEnv
+from puck.env import PuckStandEnv
 
-__all__ = ["PuckBalanceEnv"]
+__all__ = ["PuckStandEnv"]

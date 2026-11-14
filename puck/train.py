@@ -1,114 +1,95 @@
-"""Train a PPO policy for the Puck balance environment."""
-import argparse, pathlib
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.monitor import Monitor
+"""Train the Puck standing policy with Genesis Forge and RSL-RL."""
 
-from puck.env import DEFAULT_MODEL_PATH, PROJECT_ROOT, PuckBalanceEnv
+import argparse
+import copy
+import pathlib
+
+import genesis as gs
+import torch
+from genesis_forge.wrappers import RslRlWrapper
+from rsl_rl.runners import OnPolicyRunner
+
+from puck.env import PROJECT_ROOT, PuckStandEnv
 
 
-class ResetDifficultyCurriculum(BaseCallback):
-    """Increase reset perturbations throughout training."""
-
-    def __init__(self, total_timesteps: int) -> None:
-        super().__init__()
-        self.total_timesteps = total_timesteps
-        self._last_percent = -1
-
-    def _on_step(self) -> bool:
-        percent = min(100, 100 * self.num_timesteps // self.total_timesteps)
-        if percent != self._last_percent:
-            self.training_env.env_method("set_difficulty", percent / 100.0)
-            self._last_percent = percent
-        return True
+def training_config(seed: int = 0) -> dict:
+    return {
+        "algorithm": {
+            "class_name": "PPO",
+            "clip_param": 0.2,
+            "desired_kl": 0.01,
+            "entropy_coef": 0.01,
+            "gamma": 0.99,
+            "lam": 0.95,
+            "learning_rate": 0.001,
+            "max_grad_norm": 1.0,
+            "num_learning_epochs": 5,
+            "num_mini_batches": 4,
+            "schedule": "adaptive",
+            "use_clipped_value_loss": True,
+            "value_loss_coef": 1.0,
+        },
+        "actor": {
+            "class_name": "MLPModel",
+            "hidden_dims": [128, 128],
+            "activation": "elu",
+            "obs_normalization": True,
+            "distribution_cfg": {
+                "class_name": "GaussianDistribution",
+                "init_std": 0.3,
+            },
+        },
+        "critic": {
+            "class_name": "MLPModel",
+            "hidden_dims": [128, 128],
+            "activation": "elu",
+            "obs_normalization": True,
+        },
+        "seed": seed,
+        "num_steps_per_env": 24,
+        "save_interval": 100,
+        "obs_groups": {"actor": ["policy"], "critic": ["policy"]},
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--timesteps", type=int, default=1_000_000)
+    parser.add_argument("--num-envs", type=int, default=64)
+    parser.add_argument("--iterations", type=int, default=500)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--n-steps", type=int, default=2048)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--model-path", type=pathlib.Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument(
-        "--output-dir", type=pathlib.Path, default=PROJECT_ROOT / "runs" / "ppo"
-    )
-    parser.add_argument("--max-episode-steps", type=int, default=500)
-    parser.add_argument(
-        "--target-height",
-        type=float,
-        default=0.3,
-        help="normalized leg stance height target (0.05 to 1.0)",
-    )
-    parser.add_argument("--target-pitch", type=float, default=0.0, help="body pitch target in radians")
-    parser.add_argument("--target-roll", type=float, default=0.0, help="body roll target in radians")
-    parser.add_argument(
-        "--target-forward-speed",
-        type=float,
-        default=0.0,
-        help="body +Y forward speed target in meters per second",
-    )
-    parser.add_argument(
-        "--target-sideways-speed",
-        type=float,
-        default=0.0,
-        help="body +X sideways speed target in meters per second",
-    )
-    parser.add_argument(
-        "--target-yaw-rate",
-        type=float,
-        default=0.0,
-        help="body +Z yaw rate target in radians per second",
-    )
-    parser.add_argument(
-        "--target-body-height",
-        type=float,
-        default=None,
-        help=(
-            "override the automatically computed body COM height in meters; "
-            "use for tilted targets that cannot auto-calibrate two-wheel contact"
-        ),
+        "--log-dir",
+        type=pathlib.Path,
+        default=PROJECT_ROOT / "runs" / "forge" / "puck-stand",
     )
     args = parser.parse_args()
+    if args.num_envs <= 0 or args.iterations <= 0:
+        parser.error("--num-envs and --iterations must be positive")
 
-    if args.timesteps <= 0:
-        parser.error("--timesteps must be positive")
-    if args.n_steps <= 1:
-        parser.error("--n-steps must be greater than 1")
-    if args.batch_size <= 1:
-        parser.error("--batch-size must be greater than 1")
+    if args.device == "cpu":
+        torch.set_default_device("cpu")
+        backend = gs.cpu
+    else:
+        backend = gs.gpu
+    gs.init(backend=backend, seed=args.seed, logging_level="warning")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    env = Monitor(
-        PuckBalanceEnv(
-            model_path=args.model_path,
-            max_episode_steps=args.max_episode_steps,
-            target_stance_height=args.target_height,
-            target_pitch=args.target_pitch,
-            target_roll=args.target_roll,
-            target_forward_speed=args.target_forward_speed,
-            target_sideways_speed=args.target_sideways_speed,
-            target_yaw_rate=args.target_yaw_rate,
-            target_body_height=args.target_body_height,
-        ),
-        filename=str(args.output_dir / "monitor.csv"),
-    )
+    args.log_dir.mkdir(parents=True, exist_ok=True)
+    env = RslRlWrapper(PuckStandEnv(num_envs=args.num_envs, headless=True))
     try:
-        model = PPO(
-            "MlpPolicy",
+        env.build()
+        env.reset()
+        runner = OnPolicyRunner(
             env,
-            verbose=1,
-            seed=args.seed,
-            n_steps=args.n_steps,
-            batch_size=min(args.batch_size, args.n_steps),
+            copy.deepcopy(training_config(args.seed)),
+            str(args.log_dir),
+            device=gs.device,
         )
-        model.learn(
-            total_timesteps=args.timesteps,
-            callback=ResetDifficultyCurriculum(args.timesteps),
+        runner.learn(
+            num_learning_iterations=args.iterations,
+            init_at_random_ep_len=False,
         )
-        model_path = args.output_dir / "puck_ppo"
-        model.save(model_path)
-        print(f"Saved policy to {model_path}.zip")
+        print(f"Training checkpoints and logs saved in {args.log_dir}")
     finally:
         env.close()
 

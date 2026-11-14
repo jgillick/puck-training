@@ -2,7 +2,7 @@
 
 ### your _Personal Upright Control Kompanion_
 
-Puck is a 8DOF bipedal wheeled robot project. This is my attempt to train an RL policy to drive it!
+Puck is an 8DOF bipedal wheeled robot project. This is my attempt to train an RL policy to stand it up and balance!
 
 ![puck gif horizontal](https://t413.com/p/projects/puck/puck-horiz-small.gif)
 
@@ -10,9 +10,12 @@ Puck is a 8DOF bipedal wheeled robot project. This is my attempt to train an RL 
 
 - Get `uv`: `brew install uv` or `pip install uv`
 - `uv sync` to install dependencies
-- `uv run python -m puck.train --timesteps 500000 --target-height 0.4` starts training a model!
-   * see `--help` for all the options
-- simulate results with `uv run mjpython -m puck.evaluate --render --episodes 1 --realtime 1 --steps 4000`
+- `uv run python -m puck.train --num-envs 64 --iterations 500` trains a policy
+- Evaluate a checkpoint with `uv run python -m puck.evaluate runs/forge/puck-stand/model_500.pt --render`
+
+## Training environment
+
+The Genesis Forge environment imports `robot.xml` and builds the ground plane in Genesis. At startup it passively simulates the crouched, unpowered robot settling onto the floor, then resets each episode to that saved multi-contact pose. The policy's neutral action commands the classical controller's half-extension leg pose (`height=0.5`). Fixed-gain position control drives the six leg joints, while bounded torque actions on the two wheels let the policy balance without fighting wheel-position setpoints.
 
 ## About the robot
 
