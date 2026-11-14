@@ -1,0 +1,127 @@
+<?xml version="1.0" ?>
+<!-- Generated using onshape-to-robot -->
+<mujoco model="puck-mujoco">
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+  <default>
+    <default class="puck-mujoco">
+      <joint frictionloss="0.1" armature="0.005"/>
+      <position kp="50" dampratio="1"/>
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+      </default>
+      <default class="collision">
+        <geom group="3"/>
+      </default>
+    </default>
+  </default>
+  <worldbody>
+    <!-- Link body -->
+    <body name="body" pos="0 0 0" quat="1 0 0 0" childclass="puck-mujoco">
+      <freejoint name="body_freejoint"/>
+      <inertial pos="-0.000876921 -0.0252874 0.0694394" mass="1.413" fullinertia="0.00744648 0.00545121 0.00983263 4.07548e-06 -1.19151e-05 -0.000816192"/>
+      <!-- Part body -->
+      <geom type="mesh" class="visual" pos="-0.143582 0.00164685 0.0697348" quat="0 0.00249662 -0 -0.999997" mesh="body" material="body_material"/>
+      <geom type="mesh" class="collision" pos="-0.143582 0.00164685 0.0697348" quat="0 0.00249662 -0 -0.999997" mesh="body" material="body_material"/>
+      <!-- Part controller -->
+      <geom type="mesh" class="visual" pos="0.141812 -0.0107074 0.0723044" quat="0.995733 -0.0922482 -0.00248597 -0.000230309" mesh="controller" material="controller_material"/>
+      <geom type="mesh" class="collision" pos="0.141812 -0.0107074 0.0723044" quat="0.995733 -0.0922482 -0.00248597 -0.000230309" mesh="controller" material="controller_material"/>
+      <!-- Link flexor -->
+      <body name="flexor" pos="-0.12088 -0.0473531 0.0698481" quat="0.00176538 0.00176538 0.707105 -0.707105">
+        <!-- Joint from body to flexor -->
+        <joint axis="0 0 1" name="flexor_r" type="hinge" range="-1.5645433902012762 1.577049263388517"/>
+        <inertial pos="0.0153772 -9.6154e-05 -0.0159997" mass="0.035" fullinertia="1.85262e-05 1.80802e-05 1.46279e-05 -2.789e-09 5.01391e-06 -3.1352e-08"/>
+        <!-- Part flexor -->
+        <geom type="mesh" class="visual" pos="0.0227011 -0.00014195 -0.049" quat="0.707103 0.707103 -0.00221074 -0.00221074" mesh="flexor" material="flexor_material"/>
+        <geom type="mesh" class="collision" pos="0.0227011 -0.00014195 -0.049" quat="0.707103 0.707103 -0.00221074 -0.00221074" mesh="flexor" material="flexor_material"/>
+        <!-- Link hamstring -->
+        <body name="hamstring" pos="0.0227011 -0.00014195 -0.049" quat="0.0656379 0.70445 0.0612343 0.704054">
+          <!-- Joint from flexor to hamstring -->
+          <joint axis="0 0 1" name="hip_r" type="hinge" range="-1.2165965983177462 1.750463130072614"/>
+          <inertial pos="-0.0923826 -0.0162895 -0.0127417" mass="0.673" fullinertia="0.000279064 0.00258633 0.00276728 -0.000419888 -1.05807e-05 -1.86566e-06"/>
+          <!-- Part hamstring -->
+          <geom type="mesh" class="visual" pos="-0 -0 0" quat="0.541675 -0.454519 -0.541675 -0.454519" mesh="hamstring" material="hamstring_material"/>
+          <geom type="mesh" class="collision" pos="-0 -0 0" quat="0.541675 -0.454519 -0.541675 -0.454519" mesh="hamstring" material="hamstring_material"/>
+          <!-- Link shin -->
+          <body name="shin" pos="-0.157569 -0.0277837 0" quat="0.984525 -0 0 0.175242">
+            <!-- Joint from hamstring to shin -->
+            <joint axis="0 0 1" name="knee_r" type="hinge" range="-3.493895383262293 1.3930265223218292"/>
+            <inertial pos="0.113783 -0.120071 0.0301305" mass="0.404" fullinertia="0.00423073 0.00126399 0.00536907 0.000164145 -0.000138572 0.000105135"/>
+            <!-- Part shin -->
+            <geom type="mesh" class="visual" pos="0.157569 -0.0277837 -0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
+            <geom type="mesh" class="collision" pos="0.157569 -0.0277837 -0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
+            <!-- Link wheel -->
+            <body name="wheel" pos="0.157569 -0.0277837 -0" quat="0.807188 0 -0 -0.590295">
+              <!-- Joint from shin to wheel -->
+              <joint axis="0 0 1" name="wheel_r"/>
+              <inertial pos="-0 0 0.07005" mass="0.126" fullinertia="0.000159854 0.000159854 0.000300187 0 -0 -0"/>
+              <!-- Part wheel -->
+              <geom type="mesh" class="visual" pos="0 0 0" quat="0.40558 -0.579228 -0.40558 -0.579228" mesh="wheel" material="wheel_material"/>
+              <geom type="mesh" class="collision" pos="0 0 0" quat="0.40558 -0.579228 -0.40558 -0.579228" mesh="wheel" material="wheel_material"/>
+            </body>
+          </body>
+        </body>
+      </body>
+      <!-- Link flexor_2 -->
+      <body name="flexor_2" pos="0.119117 -0.0473531 0.0710465" quat="0.707105 0.707105 -0.00176538 0.00176538">
+        <!-- Joint from body to flexor_2 -->
+        <joint axis="0 0 1" name="flexor_l" type="hinge" range="-1.5718071742594475 1.5697854793303456"/>
+        <inertial pos="0.0153775 1.55443e-05 -0.0159997" mass="0.035" fullinertia="1.85262e-05 1.80801e-05 1.46279e-05 4.51e-10 5.01401e-06 5.068e-09"/>
+        <!-- Part flexor_2 -->
+        <geom type="mesh" class="visual" pos="0.0227015 2.29478e-05 -0.049" quat="0.707107 0.707107 0.000357389 0.000357389" mesh="flexor" material="flexor_material"/>
+        <geom type="mesh" class="collision" pos="0.0227015 2.29478e-05 -0.049" quat="0.707107 0.707107 0.000357389 0.000357389" mesh="flexor" material="flexor_material"/>
+        <!-- Link hamstring_2 -->
+        <body name="hamstring_2" pos="0.0227015 2.29478e-05 -0.049" quat="0.0616689 0.70435 0.062381 0.704412">
+          <!-- Joint from flexor_2 to hamstring_2 -->
+          <joint axis="0 0 1" name="hip_l" type="hinge" range="-1.3951374955171785 1.5719222328731817"/>
+          <inertial pos="-0.0923826 -0.0162895 -0.0127417" mass="0.673" fullinertia="0.000279064 0.00258633 0.00276728 -0.000419888 -1.05807e-05 -1.86566e-06"/>
+          <!-- Part hamstring_2 -->
+          <geom type="mesh" class="visual" pos="-0 -0 -0" quat="0.541675 -0.454519 -0.541675 -0.454519" mesh="hamstring" material="hamstring_material"/>
+          <geom type="mesh" class="collision" pos="-0 -0 -0" quat="0.541675 -0.454519 -0.541675 -0.454519" mesh="hamstring" material="hamstring_material"/>
+          <!-- Link shin_2 -->
+          <body name="shin_2" pos="-0.157569 -0.0277837 0" quat="0.984623 -0 0 0.174692">
+            <!-- Joint from hamstring_2 to shin_2 -->
+            <joint axis="0 0 1" name="knee_l" type="hinge" range="-2.0965145846637543 2.7904073209203686"/>
+            <inertial pos="0.113783 -0.120071 0.0301305" mass="0.404" fullinertia="0.00423073 0.00126399 0.00536907 0.000164145 -0.000138572 0.000105135"/>
+            <!-- Part shin_2 -->
+            <geom type="mesh" class="visual" pos="0.157569 -0.0277837 0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
+            <geom type="mesh" class="collision" pos="0.157569 -0.0277837 0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
+            <!-- Link wheel_2 -->
+            <body name="wheel_2" pos="0.157569 -0.0277837 0" quat="0 1 0 0">
+              <!-- Joint from shin_2 to wheel_2 -->
+              <joint axis="0 0 1" name="wheel_l"/>
+              <inertial pos="-0 -0 -0.07005" mass="0.126" fullinertia="0.000159854 0.000159854 0.000300187 -0 -0 -0"/>
+              <!-- Part wheel_2 -->
+              <geom type="mesh" class="visual" pos="0 -0 0" quat="0.56068 0.430857 0.56068 -0.430857" mesh="wheel" material="wheel_material"/>
+              <geom type="mesh" class="collision" pos="0 -0 0" quat="0.56068 0.430857 0.56068 -0.430857" mesh="wheel" material="wheel_material"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <asset>
+    <mesh file="flexor.stl"/>
+    <mesh file="shin.stl"/>
+    <mesh file="wheel.stl"/>
+    <mesh file="controller.stl"/>
+    <mesh file="hamstring.stl"/>
+    <mesh file="body.stl"/>
+    <material name="body_material" rgba="0.501961 0.486275 0.439216 1"/>
+    <material name="controller_material" rgba="0.972549 0.529412 0.00392157 1"/>
+    <material name="flexor_material" rgba="0.439216 0.47451 0.501961 1"/>
+    <material name="hamstring_material" rgba="0.0862745 0.321569 0.580392 1"/>
+    <material name="shin_material" rgba="0.368627 0.25098 0.643137 1"/>
+    <material name="wheel_material" rgba="0.301961 0.301961 0.301961 1"/>
+  </asset>
+  <actuator>
+    <position class="puck-mujoco" name="flexor_r" joint="flexor_r" inheritrange="1"/>
+    <position class="puck-mujoco" name="hip_r" joint="hip_r" inheritrange="1"/>
+    <position class="puck-mujoco" name="knee_r" joint="knee_r" inheritrange="1"/>
+    <position class="puck-mujoco" name="wheel_r" joint="wheel_r"/>
+    <position class="puck-mujoco" name="flexor_l" joint="flexor_l" inheritrange="1"/>
+    <position class="puck-mujoco" name="hip_l" joint="hip_l" inheritrange="1"/>
+    <position class="puck-mujoco" name="knee_l" joint="knee_l" inheritrange="1"/>
+    <position class="puck-mujoco" name="wheel_l" joint="wheel_l"/>
+  </actuator>
+  <equality/>
+</mujoco>
