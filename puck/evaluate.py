@@ -18,6 +18,29 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model-path", type=pathlib.Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument(
+        "--target-height",
+        type=float,
+        default=0.3,
+        help="normalized leg stance height target (0.05 to 1.0)",
+    )
+    parser.add_argument("--target-pitch", type=float, default=0.0, help="body pitch target in radians")
+    parser.add_argument("--target-roll", type=float, default=0.0, help="body roll target in radians")
+    parser.add_argument(
+        "--target-body-height",
+        type=float,
+        default=None,
+        help=(
+            "override the automatically computed body COM height in meters; "
+            "use for tilted targets that cannot auto-calibrate two-wheel contact"
+        ),
+    )
+    parser.add_argument(
+        "--difficulty",
+        type=float,
+        default=0.5,
+        help="reset perturbation strength from 0 (easy) to 1 (hard)",
+    )
     # allow realtime multiplier (like 1x, 2x, etc. default means non-realtime, fastest speed)
     parser.add_argument("--realtime", type=float, nargs="?", const=1.0, default=None, help="realtime multiplier")
     args = parser.parse_args()
@@ -28,7 +51,12 @@ def main() -> None:
         model_path=args.model_path,
         render_mode="human" if args.render else None,
         max_episode_steps=args.steps,
+        target_stance_height=args.target_height,
+        target_pitch=args.target_pitch,
+        target_roll=args.target_roll,
+        target_body_height=args.target_body_height,
     )
+    env.set_difficulty(args.difficulty)
     env.render_realtime = args.realtime
     env.render_nohold = args.nohold
     try:
@@ -49,7 +77,9 @@ def main() -> None:
             print(
                 f"Episode {episode + 1}: reward={total_reward:.2f}, "
                 f"steps={steps}, outcome={outcome}, "
-                f"final_tilt={info['tilt_angle']:.3f} rad"
+                f"final_tilt={info['tilt_angle']:.3f} rad, "
+                f"pitch={info['pitch']:.3f} rad, roll={info['roll']:.3f} rad, "
+                f"body_height={info['body_height']:.3f} m"
             )
     finally:
         env.close()
