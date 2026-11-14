@@ -27,6 +27,24 @@ def main() -> None:
     parser.add_argument("--target-pitch", type=float, default=0.0, help="body pitch target in radians")
     parser.add_argument("--target-roll", type=float, default=0.0, help="body roll target in radians")
     parser.add_argument(
+        "--target-forward-speed",
+        type=float,
+        default=0.0,
+        help="body +Y forward speed target in meters per second",
+    )
+    parser.add_argument(
+        "--target-sideways-speed",
+        type=float,
+        default=0.0,
+        help="body +X sideways speed target in meters per second",
+    )
+    parser.add_argument(
+        "--target-yaw-rate",
+        type=float,
+        default=0.0,
+        help="body +Z yaw rate target in radians per second",
+    )
+    parser.add_argument(
         "--target-body-height",
         type=float,
         default=None,
@@ -54,6 +72,9 @@ def main() -> None:
         target_stance_height=args.target_height,
         target_pitch=args.target_pitch,
         target_roll=args.target_roll,
+        target_forward_speed=args.target_forward_speed,
+        target_sideways_speed=args.target_sideways_speed,
+        target_yaw_rate=args.target_yaw_rate,
         target_body_height=args.target_body_height,
     )
     env.set_difficulty(args.difficulty)
@@ -79,7 +100,10 @@ def main() -> None:
                 f"steps={steps}, outcome={outcome}, "
                 f"final_tilt={info['tilt_angle']:.3f} rad, "
                 f"pitch={info['pitch']:.3f} rad, roll={info['roll']:.3f} rad, "
-                f"body_height={info['body_height']:.3f} m"
+                f"body_height={info['body_height']:.3f} m, "
+                f"forward={info['forward_speed']:.3f} m/s, "
+                f"sideways={info['sideways_speed']:.3f} m/s, "
+                f"yaw_rate={info['yaw_rate']:.3f} rad/s"
             )
     finally:
         env.close()

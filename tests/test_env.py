@@ -14,6 +14,9 @@ class PuckBalanceEnvTests(unittest.TestCase):
         target_pitch: float = 0.0,
         target_roll: float = 0.0,
         target_body_height: float | None = None,
+        target_forward_speed: float = 0.0,
+        target_sideways_speed: float = 0.0,
+        target_yaw_rate: float = 0.0,
     ) -> PuckBalanceEnv:
         return PuckBalanceEnv(
             reset_noise_scale=0.0,
@@ -21,6 +24,9 @@ class PuckBalanceEnvTests(unittest.TestCase):
             target_pitch=target_pitch,
             target_roll=target_roll,
             target_body_height=target_body_height,
+            target_forward_speed=target_forward_speed,
+            target_sideways_speed=target_sideways_speed,
+            target_yaw_rate=target_yaw_rate,
         )
 
     def test_reset_starts_in_supported_stance(self) -> None:
@@ -131,6 +137,34 @@ class PuckBalanceEnvTests(unittest.TestCase):
             self.assertAlmostEqual(info["roll"], info["target_roll"], places=6)
             self.assertAlmostEqual(info["body_height"], 0.15, places=6)
             self.assertTrue(env.observation_space.contains(observation))
+        finally:
+            env.close()
+
+    def test_body_frame_speed_targets_are_observed_and_penalized(self) -> None:
+        env = self.make_env(
+            target_forward_speed=0.0,
+            target_sideways_speed=0.0,
+            target_yaw_rate=0.0,
+        )
+        try:
+            observation, _ = env.reset(seed=19)
+            env.data.qvel[env._root_dof_adr + 1] = 1.0
+            env.data.qvel[env._root_dof_adr + 5] = 0.5
+            mujoco.mj_forward(env.model, env.data)
+
+            angular_velocity, linear_velocity = env._body_velocity()
+            self.assertAlmostEqual(linear_velocity[1], 1.0, places=3)
+            self.assertAlmostEqual(angular_velocity[2], 0.5, places=3)
+
+            observation = env._get_obs()
+            self.assertAlmostEqual(observation[5], 0.1, places=3)
+            self.assertAlmostEqual(observation[7], 0.5, places=3)
+
+            _, _, _, _, info = env.step(
+                np.zeros(env.action_space.shape, dtype=np.float32)
+            )
+            self.assertGreater(info["forward_speed_cost"], 0.0)
+            self.assertGreater(info["yaw_rate_cost"], 0.0)
         finally:
             env.close()
 

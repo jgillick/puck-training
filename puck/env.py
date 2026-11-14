@@ -53,6 +53,9 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
         target_stance_height: float = 0.3,
         target_pitch: float = 0.0,
         target_roll: float = 0.0,
+        target_forward_speed: float = 0.0,
+        target_sideways_speed: float = 0.0,
+        target_yaw_rate: float = 0.0,
         target_body_height: float | None = None,
         max_reset_tilt: float = 0.12,
         max_reset_joint_noise: float = 0.04,
@@ -74,6 +77,12 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             raise ValueError("target_stance_height must be between 0.05 and 1.0")
         if not np.isfinite(target_pitch) or not np.isfinite(target_roll):
             raise ValueError("target_pitch and target_roll must be finite")
+        if not np.all(
+            np.isfinite(
+                (target_forward_speed, target_sideways_speed, target_yaw_rate)
+            )
+        ):
+            raise ValueError("target speeds and yaw rate must be finite")
         if np.hypot(target_pitch, target_roll) >= fall_angle:
             raise ValueError("target pitch and roll must be within the fall angle")
         if target_body_height is not None and (
@@ -100,6 +109,9 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
         self.target_stance_height = target_stance_height
         self.target_pitch = target_pitch
         self.target_roll = target_roll
+        self.target_forward_speed = target_forward_speed
+        self.target_sideways_speed = target_sideways_speed
+        self.target_yaw_rate = target_yaw_rate
         self.max_reset_tilt = max_reset_tilt
         self.max_reset_joint_noise = max_reset_joint_noise
         self.max_reset_angular_velocity = max_reset_angular_velocity
@@ -234,7 +246,7 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             low=-1.0, high=1.0, shape=(self.model.nu,), dtype=np.float32
         )
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(29,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(32,), dtype=np.float32
         )
         self._step_count = 0
         self._viewer: typing.Any | None = None
@@ -344,15 +356,28 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             raise ValueError("difficulty must be between 0 and 1")
         self.difficulty = float(difficulty)
 
+    def _body_velocity(
+        self,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        spatial_velocity = np.zeros(6, dtype=np.float64)
+        mujoco.mj_objectVelocity(
+            self.model,
+            self.data,
+            mjtObj.mjOBJ_BODY,
+            self._root_body_id,
+            spatial_velocity,
+            0,
+        )
+        rotation = self.data.xmat[self._root_body_id].reshape(3, 3)
+        return (
+            rotation.T @ spatial_velocity[:3],
+            rotation.T @ spatial_velocity[3:],
+        )
+
     def _get_obs(self) -> NDArray[np.float32]:
         rotation = self.data.xmat[self._root_body_id].reshape(3, 3)
         gravity_body = rotation.T @ np.asarray([0.0, 0.0, 1.0])
-        root_angular_velocity = self.data.qvel[
-            self._root_dof_adr : self._root_dof_adr + 3
-        ]
-        root_linear_velocity = self.data.qvel[
-            self._root_dof_adr + 3 : self._root_dof_adr + 6
-        ]
+        root_angular_velocity, root_linear_velocity = self._body_velocity()
         leg_positions = self.data.qpos[self._pose_qpos_addresses]
         leg_velocities = self.data.qvel[self._pose_dof_addresses]
         wheel_velocities = self.data.qvel[self._wheel_dof_addresses]
@@ -375,6 +400,9 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
                         self.target_stance_height,
                         self.target_pitch / np.pi,
                         self.target_roll / np.pi,
+                        self.target_forward_speed / 3.0,
+                        self.target_sideways_speed / 3.0,
+                        self.target_yaw_rate / 3.0,
                     ]
                 ),
             )
@@ -437,14 +465,14 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             0.0, velocity_noise, size=self.model.nv
         )
         self.data.qvel[
-            self._root_dof_adr : self._root_dof_adr + 2
+            self._root_dof_adr + 3 : self._root_dof_adr + 5
         ] += self.np_random.uniform(
             -self.difficulty * self.max_reset_angular_velocity,
             self.difficulty * self.max_reset_angular_velocity,
             size=2,
         )
         self.data.qvel[
-            self._root_dof_adr + 3 : self._root_dof_adr + 5
+            self._root_dof_adr : self._root_dof_adr + 2
         ] += self.np_random.uniform(
             -self.difficulty * self.max_reset_linear_velocity,
             self.difficulty * self.max_reset_linear_velocity,
@@ -465,6 +493,9 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             "target_stance_height": self.target_stance_height,
             "target_pitch": self.target_pitch,
             "target_roll": self.target_roll,
+            "target_forward_speed": self.target_forward_speed,
+            "target_sideways_speed": self.target_sideways_speed,
+            "target_yaw_rate": self.target_yaw_rate,
             "actuator_names": self.actuator_names,
             "sensor_names": self.sensor_names,
         }
@@ -543,12 +574,7 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
         stance_reward = float(np.exp(-np.mean(np.square(pose_error / 0.25))))
         height_reward = float(np.exp(-((height_error / 0.05) ** 2)))
 
-        root_angular_velocity = self.data.qvel[
-            self._root_dof_adr : self._root_dof_adr + 3
-        ]
-        root_linear_velocity = self.data.qvel[
-            self._root_dof_adr + 3 : self._root_dof_adr + 6
-        ]
+        root_angular_velocity, root_linear_velocity = self._body_velocity()
         leg_velocity = self.data.qvel[self._pose_dof_addresses]
         wheel_velocity = self.data.qvel[self._wheel_dof_addresses]
         joint_action_cost = 0.005 * float(
@@ -558,11 +584,21 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             np.mean(np.square(normalized_action[self._wheel_action_indices]))
         )
         angular_velocity_cost = 0.01 * float(
-            np.mean(np.square(root_angular_velocity / 5.0))
+            np.mean(np.square(root_angular_velocity[:2] / 5.0))
         )
-        linear_velocity_cost = 0.02 * float(
-            np.mean(np.square(root_linear_velocity[:2] / 1.0))
-        )
+        # The wheel axle spans body X, so body +Y is forward for this model.
+        forward_speed = float(root_linear_velocity[1])
+        sideways_speed = float(root_linear_velocity[0])
+        yaw_rate = float(root_angular_velocity[2])
+        forward_speed_cost = 0.25 * (
+            (forward_speed - self.target_forward_speed) / 1.0
+        ) ** 2
+        sideways_speed_cost = 0.25 * (
+            (sideways_speed - self.target_sideways_speed) / 1.0
+        ) ** 2
+        yaw_rate_cost = 0.25 * (
+            (yaw_rate - self.target_yaw_rate) / 1.0
+        ) ** 2
         leg_velocity_cost = 0.001 * float(np.mean(np.square(leg_velocity / 10.0)))
         wheel_velocity_cost = 0.002 * float(np.mean(np.square(wheel_velocity / 20.0)))
         position_error = self.data.qpos[
@@ -578,7 +614,9 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             - joint_action_cost
             - wheel_action_cost
             - angular_velocity_cost
-            - linear_velocity_cost
+            - forward_speed_cost
+            - sideways_speed_cost
+            - yaw_rate_cost
             - leg_velocity_cost
             - wheel_velocity_cost
             - position_cost
@@ -593,6 +631,12 @@ class PuckBalanceEnv(gym.Env[NDArray[np.float32], NDArray[np.float32]]):
             "orientation_reward": orientation_reward,
             "stance_reward": stance_reward,
             "height_reward": height_reward,
+            "forward_speed": forward_speed,
+            "sideways_speed": sideways_speed,
+            "yaw_rate": yaw_rate,
+            "forward_speed_cost": forward_speed_cost,
+            "sideways_speed_cost": sideways_speed_cost,
+            "yaw_rate_cost": yaw_rate_cost,
             "joint_action_cost": joint_action_cost,
             "wheel_action_cost": wheel_action_cost,
             "episode_step": self._step_count,
