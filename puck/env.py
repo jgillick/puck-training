@@ -162,7 +162,7 @@ class PuckStandEnv(ManagedEnvironment):
             range={
                 "lin_vel_x": (0.0, 0.1),
                 "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (0.0, 0.0),
+                "ang_vel_z": (-0.1, 0.1),
             },
         )
         self.height_command = CommandManager(self, range=(0.1, 0.5))
@@ -182,6 +182,44 @@ class PuckStandEnv(ManagedEnvironment):
             non_wheel_contacts = contacts["valid_mask"] & ~wheel_contacts
             return non_wheel_contacts.any(dim=1)
 
+        def hip_flexor_alignment(env) -> torch.Tensor:
+            joint_positions = self.actuator_manager.get_dofs_position()
+            flexor_indices = [
+                self.actuator_manager.dofs_names.index(name)
+                for name in ("flexor_r", "flexor_l")
+            ]
+            max_flexor_angle = joint_positions[:, flexor_indices].abs().amax(dim=1)
+            tolerance = math.pi / 30
+            excess = torch.relu(max_flexor_angle - tolerance)
+            return torch.exp(-4.0 * (excess / tolerance).square())
+
+        def yaw_rate_error(env) -> torch.Tensor:
+            commanded_yaw_rate = self.velocity_command.command[:, 2]
+            actual_yaw_rate = self.entity_manager.get_angular_velocity()[:, 2]
+            return (actual_yaw_rate - commanded_yaw_rate).square()
+
+        def hip_knee_symmetry_reward(env) -> torch.Tensor:
+            '''Reward symmetrical hip & knee (values are inverted between l / r)'''
+            positions = self.actuator_manager.get_dofs_position()
+            dof_indices = {
+                name: index
+                for index, name in enumerate(self.actuator_manager.dofs_names)
+            }
+            mirrored_joints = (
+                ("hip_l", "hip_r", -1.0),
+                ("knee_l", "knee_r", -1.0),
+            )
+            errors = torch.stack(
+                [
+                    positions[:, dof_indices[left]]
+                    - sign * positions[:, dof_indices[right]]
+                    for left, right, sign in mirrored_joints
+                ],
+                dim=1,
+            )
+            return torch.exp(-errors.square().mean(dim=1))
+
+
         PuckRewardManager(
             self,
             cfg={
@@ -197,6 +235,25 @@ class PuckStandEnv(ManagedEnvironment):
                     "fn": rewards.flat_orientation_l2(
                         entity_manager=self.entity_manager
                     ),
+                },
+                "yaw_velocity": {
+                    "weight": 1.0,
+                    "fn": rewards.command_tracking_ang_vel(
+                        vel_cmd_manager=self.velocity_command,
+                        entity_manager=self.entity_manager,
+                    ),
+                },
+                "yaw_rate_error": {
+                    "weight": -0.5,
+                    "fn": yaw_rate_error,
+                },
+                "leg_symmetry": {
+                    "weight": 1.0,
+                    "fn": hip_knee_symmetry_reward,
+                },
+                "hip_flexor_alignment": {
+                    "weight": 1.0,
+                    "fn": hip_flexor_alignment,
                 },
                 "body_angular_velocity": {
                     "weight": -0.02,
