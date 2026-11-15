@@ -1,6 +1,6 @@
 """Genesis Forge environment for teaching Puck to stand and balance."""
 
-import math, pathlib
+import math, pathlib, typing
 from collections.abc import Sequence
 import torch
 import genesis as gs
@@ -21,10 +21,8 @@ from genesis_forge.mdp import observations, reset, rewards, terminations
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
 CONTROL_DT = 1 / 50
-BODY_CONTACT_GRACE_SEC = 0.75
 INITIAL_ROOT_POSITION = (0.0, 0.0, 0.23) #(x,y,z) height (m) offset caused by STANDING_JOINT_POSITIONS
 IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
-KNEE_DIRECTION_MARGIN = 0.2
 INITIAL_LIMB_KP = 5.0
 INITIAL_LIMB_KD = 1.0
 LIMB_JOINT_NAMES = (
@@ -46,52 +44,6 @@ STANDING_JOINT_POSITIONS = {
     "wheel_r": 0.0,
     "wheel_l": 0.0,
 }
-LEG_MIRROR_SIGNS = (
-    ("hip_l", "hip_r", -1.0),
-    ("knee_l", "knee_r", -1.0),
-)
-
-
-def _leg_symmetry_reward(
-    joint_positions: torch.Tensor, dof_names: Sequence[str]
-) -> torch.Tensor:
-    dof_indices = {name: index for index, name in enumerate(dof_names)}
-    mirror_errors = torch.stack(
-        [
-            joint_positions[:, dof_indices[left_name]]
-            - sign * joint_positions[:, dof_indices[right_name]]
-            for left_name, right_name, sign in LEG_MIRROR_SIGNS
-        ],
-        dim=1,
-    )
-    return torch.exp(-mirror_errors.square().mean(dim=1))
-
-
-def _flexor_neutral_reward(
-    joint_positions: torch.Tensor, dof_names: Sequence[str]
-) -> torch.Tensor:
-    dof_indices = {name: index for index, name in enumerate(dof_names)}
-    flexor_positions = torch.stack(
-        [
-            joint_positions[:, dof_indices["flexor_l"]],
-            joint_positions[:, dof_indices["flexor_r"]],
-        ],
-        dim=1,
-    )
-    return torch.exp(-4.0 * flexor_positions.square().mean(dim=1))
-
-
-def _knee_direction_reward(
-    joint_positions: torch.Tensor, dof_names: Sequence[str]
-) -> torch.Tensor:
-    dof_indices = {name: index for index, name in enumerate(dof_names)}
-    right_knee = joint_positions[:, dof_indices["knee_r"]]
-    left_knee = joint_positions[:, dof_indices["knee_l"]]
-    wrong_direction = (
-        torch.relu(KNEE_DIRECTION_MARGIN - right_knee).square()
-        + torch.relu(KNEE_DIRECTION_MARGIN + left_knee).square()
-    )
-    return -wrong_direction
 
 
 class PuckRewardManager(RewardManager):
@@ -208,33 +160,8 @@ class PuckStandEnv(ManagedEnvironment):
         )
         self.height_command = CommandManager(self, range=(0.1, 0.5))
 
-        def body_height_reward(env: ManagedEnvironment) -> torch.Tensor:
-            target_height = self.height_command.command[:, 0]
-            height_error = self.entity_manager.base_pos[:, 2] - target_height
-            return torch.exp(-4.0 * height_error.square())
-
-        def leg_symmetry_reward(env: ManagedEnvironment) -> torch.Tensor:
-            return _leg_symmetry_reward(
-                self.actuator_manager.get_dofs_position(),
-                self.actuator_manager.dofs_names,
-            )
-
-        def flexor_neutral_reward(env: ManagedEnvironment) -> torch.Tensor:
-            return _flexor_neutral_reward(
-                self.actuator_manager.get_dofs_position(),
-                self.actuator_manager.dofs_names,
-            )
-
-        def knee_direction_reward(env: ManagedEnvironment) -> torch.Tensor:
-            return _knee_direction_reward(
-                self.actuator_manager.get_dofs_position(),
-                self.actuator_manager.dofs_names,
-            )
-
-        def wheel_support_reward(env: ManagedEnvironment) -> torch.Tensor:
+        def ground_contact_failure(env) -> torch.Tensor:
             contacts = self.robot.get_contacts(with_entity=self.terrain, is_padded=True)
-            link_ids = contacts["link_b"]
-            valid = contacts["valid_mask"]
             wheel_ids = torch.tensor(
                 [
                     self.robot.get_link("wheel").idx,
@@ -242,31 +169,15 @@ class PuckStandEnv(ManagedEnvironment):
                 ],
                 device=gs.device,
             )
-            wheel_contact = (
-                (link_ids.unsqueeze(-1) == wheel_ids) & valid.unsqueeze(-1)
-            ).any(dim=1)
-            return wheel_contact.float().mean(dim=1)
-
-        def body_contact_failure(env: ManagedEnvironment) -> torch.Tensor:
-            contacts = self.robot.get_contacts(with_entity=self.terrain, is_padded=True)
-            body_id = self.robot.get_link("body").idx
-            body_contact = (
-                (contacts["link_b"] == body_id) & contacts["valid_mask"]
-            ).any(dim=1)
-            grace_steps = round(BODY_CONTACT_GRACE_SEC / self.dt)
-            return (env.episode_length > grace_steps) & body_contact
+            wheel_contacts = (
+                contacts["link_b"].unsqueeze(-1) == wheel_ids
+            ).any(dim=-1)
+            non_wheel_contacts = contacts["valid_mask"] & ~wheel_contacts
+            return non_wheel_contacts.any(dim=1)
 
         PuckRewardManager(
             self,
             cfg={
-                "body_height": {"weight": 10.0, "fn": body_height_reward},
-                "leg_symmetry": {"weight": 10.0, "fn": leg_symmetry_reward},
-                "flexor_neutral": {
-                    "weight": 8.0,
-                    "fn": flexor_neutral_reward,
-                },
-                "knee_direction": {"weight": 8.0, "fn": knee_direction_reward},
-                "wheel_support": {"weight": 1.0, "fn": wheel_support_reward},
                 "forward_velocity": {
                     "weight": 1.0,
                     "fn": rewards.command_tracking_lin_vel(
@@ -300,7 +211,7 @@ class PuckStandEnv(ManagedEnvironment):
             self,
             term_cfg={
                 "timeout": {"fn": terminations.timeout(), "time_out": True},
-                "body_contact": {"fn": body_contact_failure},
+                "ground_contact": {"fn": ground_contact_failure},
                 "bad_orientation": {
                     "fn": terminations.bad_orientation(
                         limit_angle=75,
@@ -380,9 +291,7 @@ class PuckStandEnv(ManagedEnvironment):
                 f"{self.actuator_manager.dofs_names}"
             )
 
-    def reset(
-        self, env_ids: torch.Tensor | Sequence[int] | None = None
-    ) -> tuple[torch.Tensor | None, dict]:
+    def reset(self, env_ids: torch.Tensor | Sequence[int] | None = None):
         observations_batch, info = super().reset(env_ids)
 
         if env_ids is None:

@@ -4,11 +4,10 @@ import genesis as gs
 import torch
 
 from puck.env import (
+    INITIAL_ROOT_POSITION,
     LIMB_JOINT_NAMES,
     STANDING_JOINT_POSITIONS,
     PuckStandEnv,
-    _knee_direction_reward,
-    _leg_symmetry_reward,
 )
 
 
@@ -51,7 +50,11 @@ class PuckStandEnvTests(unittest.TestCase):
                     atol=1e-5,
                 )
             )
-        self.assertAlmostEqual(float(self.env.robot.get_pos()[0, 2]), 0.5, places=5)
+        self.assertAlmostEqual(
+            float(self.env.robot.get_pos()[0, 2]),
+            INITIAL_ROOT_POSITION[2],
+            places=5,
+        )
 
     def test_wheel_torque_actions_are_bounded_by_robot_model(self) -> None:
         actions = torch.tensor([[2.0, 2.0], [-2.0, -2.0]], device=gs.device)
@@ -78,41 +81,6 @@ class PuckStandEnvTests(unittest.TestCase):
             },
         )
 
-    def test_leg_symmetry_uses_mirrored_signs_and_ignores_wheels(self) -> None:
-        names = self.env.actuator_manager.dofs_names
-        positions = torch.zeros((2, len(names)), device=gs.device)
-        paired_positions = {
-            "flexor_l": 0.2,
-            "flexor_r": 0.2,
-            "hip_l": -0.5,
-            "hip_r": 0.5,
-            "knee_l": -1.0,
-            "knee_r": 1.0,
-        }
-        for name, position in paired_positions.items():
-            positions[:, names.index(name)] = position
-        positions[:, names.index("wheel_l")] = 100.0
-        positions[:, names.index("wheel_r")] = -100.0
-
-        symmetry = _leg_symmetry_reward(positions, names)
-        self.assertTrue(torch.allclose(symmetry, torch.ones_like(symmetry)))
-
-        positions[0, names.index("knee_l")] += 0.5
-        symmetry = _leg_symmetry_reward(positions, names)
-        self.assertLess(float(symmetry[0]), float(symmetry[1]))
-
-    def test_knee_direction_reward_penalizes_reverse_bending(self) -> None:
-        names = self.env.actuator_manager.dofs_names
-        positions = torch.zeros((2, len(names)), device=gs.device)
-        positions[0, names.index("knee_r")] = 0.5
-        positions[0, names.index("knee_l")] = -0.5
-        positions[1, names.index("knee_r")] = -0.5
-        positions[1, names.index("knee_l")] = 0.5
-
-        rewards = _knee_direction_reward(positions, names)
-        self.assertAlmostEqual(float(rewards[0]), 0.0)
-        self.assertLess(float(rewards[1]), 0.0)
-
     def test_reset_restores_standing_pose_and_partial_reset(self) -> None:
         positions_before = self.env._as_batch(self.env.robot.get_pos()).clone()
         reset_ids = torch.tensor([1], device=gs.device)
@@ -124,7 +92,9 @@ class PuckStandEnvTests(unittest.TestCase):
 
         positions_after = self.env._as_batch(self.env.robot.get_pos())
         self.assertTrue(torch.allclose(positions_after[0], positions_before[0]))
-        self.assertAlmostEqual(float(positions_after[1, 2]), 0.5, places=5)
+        self.assertAlmostEqual(
+            float(positions_after[1, 2]), INITIAL_ROOT_POSITION[2], places=5
+        )
         joints = self.env.actuator_manager.get_dofs_position()
         names = self.env.actuator_manager.dofs_names
         for name, target in STANDING_JOINT_POSITIONS.items():
