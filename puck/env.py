@@ -94,6 +94,7 @@ class PuckStandEnv(ManagedEnvironment):
         )
         self.scene = gs.Scene(
             show_viewer=not headless,
+            vis_options=gs.options.VisOptions(rendered_envs_idx=[0]),
             sim_options=gs.options.SimOptions(dt=self.dt, substeps=2),
             rigid_options=gs.options.RigidOptions(
                 constraint_solver=gs.constraint_solver.Newton,
@@ -115,6 +116,12 @@ class PuckStandEnv(ManagedEnvironment):
             res=(640, 480),
             fov=40,
             spp=1,
+            env_idx=0,
+        )
+        self.camera.follow_entity(
+            self.robot,
+            fixed_axis=(None, None, 0.9),  # keep the camera at a steady height
+            smoothing=0.9,
         )
 
     def config(self) -> None:
