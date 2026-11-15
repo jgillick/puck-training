@@ -1,16 +1,5 @@
 """Evaluate a trained Puck standing policy."""
-
-import argparse
-import pathlib
-
-import genesis as gs
-import torch
-from genesis_forge.wrappers import RslRlWrapper
-from rsl_rl.runners import OnPolicyRunner
-
-from puck.env import PuckStandEnv
-from puck.train import is_current_policy_checkpoint, training_config
-
+import argparse, pathlib, time
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -23,11 +12,18 @@ def main() -> None:
         parser.error("--episodes must be positive")
     if not args.checkpoint.is_file():
         parser.error(f"Checkpoint does not exist: {args.checkpoint}")
-    if not is_current_policy_checkpoint(args.checkpoint):
-        parser.error(
-            "Checkpoint is not from the current MIT-mode policy; "
-            "train a new checkpoint before evaluating"
-        )
+
+    print("importing torch...", end=" ", flush=True)
+    start = time.perf_counter()
+    import torch
+    print(f"{time.perf_counter() - start:.2f}s")
+    print("importing genesis...", end=" ", flush=True)
+    start = time.perf_counter()
+    import genesis as gs
+    print(f"{time.perf_counter() - start:.2f}s")
+    from genesis_forge.wrappers import RslRlWrapper
+    from rsl_rl.runners import OnPolicyRunner
+    from puck.env import PuckStandEnv
 
     if args.device == "cpu":
         torch.set_default_device("cpu")
@@ -41,6 +37,7 @@ def main() -> None:
     try:
         env.build()
         observations, _ = env.reset()
+        from .train import training_config
         runner = OnPolicyRunner(
             env,
             training_config(),

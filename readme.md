@@ -11,12 +11,22 @@ Puck is an 8DOF bipedal wheeled robot project. This is my attempt to train an RL
 - Get `uv`: `brew install uv` or `pip install uv`
 - `uv sync` to install dependencies
 - `uv run python -m puck.train --num-envs 64 --iterations 500` trains a policy
-- Resume for 500 more iterations with `uv run python -m puck.train --num-envs 64 --iterations 500 --resume runs/forge/puck-mit/model_100.pt`
-- Evaluate and render a checkpoint with `uv run python -m puck.evaluate runs/forge/puck-mit/model_100.pt --render`
+- Resume for 500 more iterations with `uv run python -m puck.train --num-envs 64 --iterations 500 --resume runs/forge/model_100.pt`
+- Evaluate and render a checkpoint with `uv run python -m puck.evaluate runs/[yyyy-mm-dd]/model_100.pt --render`
 
 ## Training environment
 
-The Genesis Forge environment imports `robot.xml` and builds the ground plane in Genesis. At startup it passively simulates the crouched, unpowered robot settling onto the floor, then resets each episode to that saved multi-contact pose. The 10 policy outputs are, in order: six normalized limb position targets (`flexor_r`, `hip_r`, `knee_r`, `flexor_l`, `hip_l`, `knee_l`), one shared limb `kp` adjustment, one shared limb `kd` adjustment, and normalized direct wheel torques (`wheel_r`, `wheel_l`). Limb targets span each joint's MJCF limits. Shared `kp` varies from 0 to 20 around an initial value of 5; shared `kd` varies from 0 to 2 around an initial value of 1. Each step computes MIT-style limb torque as `kp * (target_position - position) - kd * velocity`, then clamps it to the actuator force limits from `robot.xml`. Wheels remain direct torque controlled. Rewards favor uprightness, a 0.5 m body height, flexors near zero, mirrored hip/knee motion (opposite signs), and wheel support while allowing brief wheel lift-offs. A knee-direction term keeps the right knee positive and left knee negative for standing. Sustained body contact after a short grace period ends the episode. Checkpoints can be resumed with `--resume`; the iteration count is the number of additional iterations to run. Torque-only and older position-control checkpoints are incompatible with this policy; start a fresh run in `runs/forge/puck-mit` before resuming or evaluating.
+The Genesis Forge environment imports `robot.xml` and builds the ground plane in Genesis. It starts at a 0.5 m base-link height with the standing pose: right flexor/hip/knee at `0`, `pi/4`, `pi/2`, and mirrored left joints. The body height observation and reward use the MJCF base-link origin (`body` at local `0, 0, 0`), not the visual mesh center.
+
+The policy has eight outputs: six limb position offsets around that standing pose, then normalized direct wheel torques. Limb position control uses the robot's actuator limits and fixed initial gains; wheels remain torque controlled. Commands provide a 0–0.1 m/s forward target, zero side/yaw targets, and a height target in meters from 0.1–0.5. Observations contain five steps of history, have no noise during initial training, and are clipped to `[-1, 1]`; returned rewards are clipped to the same range. Rewards favor commanded body height and forward speed, uprightness, mirrored leg motion, and wheel support. Sustained body contact after a short grace period ends the episode.
+
+Training records a four-second video every 20 iterations under `runs/[yyyy-mm-dd]/videos`. View the live TensorBoard logs in another terminal:
+
+```sh
+uv run tensorboard --logdir runs/[yyyy-mm-dd]
+```
+
+Checkpoints can be resumed with `--resume`; the iteration count is the number of additional iterations to run. Checkpoints from the previous action/observation layout are incompatible; start a fresh run before resuming or evaluating.
 
 ## About the robot
 

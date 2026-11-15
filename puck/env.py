@@ -1,35 +1,32 @@
 """Genesis Forge environment for teaching Puck to stand and balance."""
 
-import pathlib
+import math, pathlib
 from collections.abc import Sequence
-
-import genesis as gs
 import torch
+import genesis as gs
 from genesis_forge import ManagedEnvironment
 from genesis_forge.managers import (
     ActuatorManager,
     BaseActionManager,
+    CommandManager,
     EntityManager,
     ObservationManager,
+    PositionActionManager,
     RewardManager,
     TerminationManager,
+    VelocityCommandManager,
 )
 from genesis_forge.mdp import observations, reset, rewards, terminations
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
 CONTROL_DT = 1 / 50
-REST_SETTLE_STEPS = 250
 BODY_CONTACT_GRACE_SEC = 0.75
-INITIAL_ROOT_POSITION = (0.0, 0.0, 0.2)
+INITIAL_ROOT_POSITION = (0.0, 0.0, 0.23) #(x,y,z) height (m) offset caused by STANDING_JOINT_POSITIONS
 IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
-TARGET_BODY_HEIGHT = 0.5
 KNEE_DIRECTION_MARGIN = 0.2
 INITIAL_LIMB_KP = 5.0
-MIN_LIMB_KP = 0.0
-MAX_LIMB_KP = 20.0
 INITIAL_LIMB_KD = 1.0
-LIMB_KD_ACTION_RANGE = 1.0
 LIMB_JOINT_NAMES = (
     "flexor_r",
     "hip_r",
@@ -39,6 +36,16 @@ LIMB_JOINT_NAMES = (
     "knee_l",
 )
 WHEEL_JOINT_NAMES = ("wheel_r", "wheel_l")
+STANDING_JOINT_POSITIONS = {
+    "flexor_r": 0.0,
+    "hip_r": math.pi / 4,
+    "knee_r": math.pi / 2,
+    "flexor_l": 0.0,
+    "hip_l": -math.pi / 4,
+    "knee_l": -math.pi / 2,
+    "wheel_r": 0.0,
+    "wheel_l": 0.0,
+}
 LEG_MIRROR_SIGNS = (
     ("hip_l", "hip_r", -1.0),
     ("knee_l", "knee_r", -1.0),
@@ -87,97 +94,40 @@ def _knee_direction_reward(
     return -wrong_direction
 
 
-class PuckActionManager(BaseActionManager):
-    """Apply MIT-style position/PD control to legs and torque control to wheels."""
+class PuckRewardManager(RewardManager):
+    """Keep the scalar reward returned to the trainer in the normalized range."""
 
-    def __init__(
-        self, env: ManagedEnvironment, actuator_manager: ActuatorManager
-    ) -> None:
-        super().__init__(
-            env,
-            actuator_manager=actuator_manager,
-            actuator_joints=".*",
-        )
+    def step(self) -> torch.Tensor:
+        return super().step().clamp_(-1.0, 1.0)
 
-    @property
-    def num_actions(self) -> int:
-        return len(LIMB_JOINT_NAMES) + 2 + len(WHEEL_JOINT_NAMES)
+
+class PuckWheelTorqueActionManager(BaseActionManager):
+    """Map two normalized actions to bounded wheel torques."""
 
     def build(self) -> None:
         super().build()
         self._force_lower, self._force_upper = self.env.robot.get_dofs_force_range(
             self.dofs_idx
         )
-        self._position_lower, self._position_upper = self.env.robot.get_dofs_limit(
-            self.dofs_idx
-        )
-        dof_names = list(self.dofs)
-        self._limb_indices = torch.tensor(
-            [dof_names.index(name) for name in LIMB_JOINT_NAMES],
-            device=gs.device,
-            dtype=torch.long,
-        )
-        self._wheel_indices = torch.tensor(
-            [dof_names.index(name) for name in WHEEL_JOINT_NAMES],
-            device=gs.device,
-            dtype=torch.long,
-        )
 
     def process_actions(self, actions: torch.Tensor) -> torch.Tensor:
         actions = actions.clamp(-1.0, 1.0)
-        limb_position_actions = actions[:, : len(LIMB_JOINT_NAMES)]
-        limb_targets = self._position_lower[self._limb_indices] + (
-            0.5
-            * (limb_position_actions + 1.0)
-            * (
-                self._position_upper[self._limb_indices]
-                - self._position_lower[self._limb_indices]
-            )
-        )
-        kp_action = actions[:, 6:7]
-        kp = INITIAL_LIMB_KP + torch.where(
-            kp_action >= 0.0,
-            kp_action * (MAX_LIMB_KP - INITIAL_LIMB_KP),
-            kp_action * (INITIAL_LIMB_KP - MIN_LIMB_KP),
-        )
-        kd = INITIAL_LIMB_KD + LIMB_KD_ACTION_RANGE * actions[:, 7:8]
-
-        positions = self.actuator_manager.get_dofs_position(
-            dofs_idx=self.dofs_idx
-        )
-        velocities = self.actuator_manager.get_dofs_velocity(
-            dofs_idx=self.dofs_idx
-        )
-        limb_torques = (
-            kp * (limb_targets - positions[:, self._limb_indices])
-            - kd * velocities[:, self._limb_indices]
-        )
-        wheel_actions = actions[:, 8:10]
-        wheel_lower = self._force_lower[self._wheel_indices]
-        wheel_upper = self._force_upper[self._wheel_indices]
-        wheel_torques = torch.where(
-            wheel_actions >= 0.0,
-            wheel_actions * wheel_upper,
-            wheel_actions * -wheel_lower,
+        return torch.where(
+            actions >= 0.0,
+            actions * self._force_upper,
+            actions * -self._force_lower,
         )
 
-        torques = torch.zeros_like(positions)
-        torques[:, self._limb_indices] = limb_torques
-        torques[:, self._wheel_indices] = wheel_torques
-        return torch.maximum(
-            torch.minimum(torques, self._force_upper),
-            self._force_lower,
-        )
-
-    def send_actions_to_simulation(self, actions: torch.Tensor) -> None:
+    def send_actions_to_simulation(self, actions: torch.Tensor) -> torch.Tensor:
         self.env.robot.control_dofs_force(
             actions,
             self.dofs_idx,
         )
+        return actions
 
 
 class PuckStandEnv(ManagedEnvironment):
-    """Train a torque-controlled policy to stand Puck up and balance."""
+    """Train Puck to stand and balance with position-controlled limbs."""
 
     def __init__(
         self,
@@ -207,12 +157,16 @@ class PuckStandEnv(ManagedEnvironment):
                 quat=IDENTITY_QUATERNION,
             )
         )
-        self._rest_position: torch.Tensor | None = None
-        self._rest_quaternion: torch.Tensor | None = None
-        self._rest_dof_positions: torch.Tensor | None = None
+        self.camera = self.scene.add_camera(
+            pos=(1.2, -1.4, 0.9),
+            lookat=(0.0, 0.0, 0.35),
+            res=(640, 480),
+            fov=40,
+            spp=1,
+        )
 
     def config(self) -> None:
-        """Configure reset, MIT-style leg actions, rewards, and observations."""
+        """Configure standing-pose actions, commands, rewards, and observations."""
         self.entity_manager = EntityManager(
             self,
             entity=self.robot,
@@ -225,11 +179,38 @@ class PuckStandEnv(ManagedEnvironment):
                 }
             },
         )
-        self.actuator_manager = ActuatorManager(self, joint_names=".*")
-        self.action_manager = PuckActionManager(self, self.actuator_manager)
+        self.actuator_manager = ActuatorManager(
+            self,
+            joint_names=".*",
+            default_pos=STANDING_JOINT_POSITIONS,
+            kp=INITIAL_LIMB_KP,
+            kv=INITIAL_LIMB_KD,
+        )
+        self.action_manager = PositionActionManager(
+            self,
+            actuator_manager=self.actuator_manager,
+            actuator_joints=list(LIMB_JOINT_NAMES),
+            scale=0.5,
+            use_default_offset=True,
+        )
+        self.wheel_action_manager = PuckWheelTorqueActionManager(
+            self,
+            actuator_manager=self.actuator_manager,
+            actuator_joints=list(WHEEL_JOINT_NAMES),
+        )
+        self.velocity_command = VelocityCommandManager(
+            self,
+            range={
+                "lin_vel_x": (0.0, 0.1),
+                "lin_vel_y": (0.0, 0.0),
+                "ang_vel_z": (0.0, 0.0),
+            },
+        )
+        self.height_command = CommandManager(self, range=(0.1, 0.5))
 
         def body_height_reward(env: ManagedEnvironment) -> torch.Tensor:
-            height_error = self.entity_manager.base_pos[:, 2] - TARGET_BODY_HEIGHT
+            target_height = self.height_command.command[:, 0]
+            height_error = self.entity_manager.base_pos[:, 2] - target_height
             return torch.exp(-4.0 * height_error.square())
 
         def leg_symmetry_reward(env: ManagedEnvironment) -> torch.Tensor:
@@ -275,7 +256,7 @@ class PuckStandEnv(ManagedEnvironment):
             grace_steps = round(BODY_CONTACT_GRACE_SEC / self.dt)
             return (env.episode_length > grace_steps) & body_contact
 
-        RewardManager(
+        PuckRewardManager(
             self,
             cfg={
                 "body_height": {"weight": 10.0, "fn": body_height_reward},
@@ -286,6 +267,13 @@ class PuckStandEnv(ManagedEnvironment):
                 },
                 "knee_direction": {"weight": 8.0, "fn": knee_direction_reward},
                 "wheel_support": {"weight": 1.0, "fn": wheel_support_reward},
+                "forward_velocity": {
+                    "weight": 1.0,
+                    "fn": rewards.command_tracking_lin_vel(
+                        vel_cmd_manager=self.velocity_command,
+                        entity_manager=self.entity_manager,
+                    ),
+                },
                 "upright": {
                     "weight": -5.0,
                     "fn": rewards.flat_orientation_l2(
@@ -321,60 +309,70 @@ class PuckStandEnv(ManagedEnvironment):
                 },
             },
         )
-        ObservationManager(
+        self.observation_manager = ObservationManager(
             self,
             cfg={
                 "projected_gravity": {
-                    "fn": lambda env: self.entity_manager.get_projected_gravity()
+                    "fn": lambda env: self.entity_manager.get_projected_gravity(),
+                    "clip": (-1.0, 1.0),
                 },
                 "body_angular_velocity": {
                     "fn": lambda env: self.entity_manager.get_angular_velocity(),
                     "scale": 0.2,
-                    "clip": (-50.0, 50.0),
+                    "clip": (-1.0, 1.0),
                     "units": "rad/s",
                 },
                 "body_linear_velocity": {
                     "fn": lambda env: self.entity_manager.get_linear_velocity(),
                     "scale": 0.5,
-                    "clip": (-20.0, 20.0),
+                    "clip": (-1.0, 1.0),
                     "units": "m/s",
                 },
                 "joint_position": {
                     "fn": lambda env: (
                         self.actuator_manager.get_dofs_position()
                     ),
-                    "clip": (-10.0, 10.0),
+                    "scale": 1.0 / math.pi,
+                    "clip": (-1.0, 1.0),
                     "units": "rad",
                 },
                 "joint_velocity": {
                     "fn": lambda env: self.actuator_manager.get_dofs_velocity(),
-                    "scale": 0.05,
-                    "clip": (-200.0, 200.0),
+                    "scale": 0.01,
+                    "clip": (-1.0, 1.0),
                     "units": "rad/s",
                 },
                 "base_height": {
-                    "fn": lambda env: self.entity_manager.base_pos[:, 2:3],
-                    "units": "m",
+                    "fn": lambda env: (
+                        self.entity_manager.base_pos[:, 2:3] - 0.3
+                    )
+                    / 0.2,
+                    "clip": (-1.0, 1.0),
+                    "units": "normalized",
                 },
-                "actions": {"fn": observations.current_actions()},
+                "height_command": {
+                    "fn": lambda env: (
+                        (self.height_command.command - 0.3) / 0.2
+                    ),
+                    "clip": (-1.0, 1.0),
+                    "units": "normalized",
+                },
+                "velocity_command": {
+                    "fn": self.velocity_command.observation,
+                    "scale": 10.0,
+                    "clip": (-1.0, 1.0),
+                },
+                "actions": {
+                    "fn": observations.current_actions(),
+                    "clip": (-1.0, 1.0),
+                },
             },
+            history_len=5,
+            noise=0.0,
         )
 
     def build(self) -> None:
         super().build()
-        if self._rest_position is not None:
-            return
-
-        # Replay the passive fall once so every episode starts from the same
-        # multi-contact, actuator-off crouch instead of an arbitrary drop height.
-        for _ in range(REST_SETTLE_STEPS):
-            self.scene.step()
-
-        self._rest_position = self._as_batch(self.robot.get_pos()).clone()
-        self._rest_quaternion = self._as_batch(self.robot.get_quat()).clone()
-        self._rest_dof_positions = self.actuator_manager.get_dofs_position().clone()
-        self.entity_manager.step()
-
         if self.actuator_manager.num_dofs != 8:
             raise ValueError(
                 "Expected 8 actuated joints, "
@@ -386,8 +384,6 @@ class PuckStandEnv(ManagedEnvironment):
         self, env_ids: torch.Tensor | Sequence[int] | None = None
     ) -> tuple[torch.Tensor | None, dict]:
         observations_batch, info = super().reset(env_ids)
-        if self._rest_position is None:
-            return observations_batch, info
 
         if env_ids is None:
             reset_ids = self.all_envs_idx
@@ -396,18 +392,15 @@ class PuckStandEnv(ManagedEnvironment):
         else:
             reset_ids = torch.as_tensor(env_ids, device=gs.device, dtype=torch.long)
 
-        self.robot.set_pos(
-            self._rest_position[reset_ids],
-            envs_idx=reset_ids,
-            zero_velocity=True,
-        )
-        self.robot.set_quat(
-            self._rest_quaternion[reset_ids],
-            envs_idx=reset_ids,
-            zero_velocity=True,
-        )
+        default_positions = self.actuator_manager.default_dofs_pos
+        if default_positions.ndim == 1:
+            default_positions = default_positions.unsqueeze(0).expand(
+                len(reset_ids), -1
+            )
+        else:
+            default_positions = default_positions[reset_ids]
         self.robot.set_dofs_position(
-            self._rest_dof_positions[reset_ids],
+            default_positions,
             dofs_idx_local=self.actuator_manager.dofs_idx,
             envs_idx=reset_ids,
         )

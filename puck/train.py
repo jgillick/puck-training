@@ -1,36 +1,8 @@
 """Train the Puck standing policy with Genesis Forge and RSL-RL."""
 
-import argparse
-import copy
-import pathlib
+import torch, argparse, copy, pathlib, datetime, time
 
-import genesis as gs
-import torch
-from genesis_forge.wrappers import RslRlWrapper
-from rsl_rl.runners import OnPolicyRunner
-
-from puck.env import PROJECT_ROOT, PuckStandEnv
-
-POLICY_VERSION = 2
-
-
-class PuckRunner(OnPolicyRunner):
-    """Tag saved checkpoints so incompatible action semantics cannot be resumed."""
-
-    def save(self, path: str, infos: dict | None = None) -> None:
-        checkpoint_info = dict(infos or {})
-        checkpoint_info["puck_policy_version"] = POLICY_VERSION
-        super().save(path, checkpoint_info)
-
-
-def is_current_policy_checkpoint(path: pathlib.Path) -> bool:
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    checkpoint_info = checkpoint.get("infos")
-    return (
-        isinstance(checkpoint_info, dict)
-        and checkpoint_info.get("puck_policy_version") == POLICY_VERSION
-    )
-
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def training_config(seed: int = 0) -> dict:
     return {
@@ -51,7 +23,7 @@ def training_config(seed: int = 0) -> dict:
         },
         "actor": {
             "class_name": "MLPModel",
-            "hidden_dims": [128, 128],
+            "hidden_dims": [512, 256, 128],
             "activation": "elu",
             "obs_normalization": True,
             "distribution_cfg": {
@@ -61,7 +33,7 @@ def training_config(seed: int = 0) -> dict:
         },
         "critic": {
             "class_name": "MLPModel",
-            "hidden_dims": [128, 128],
+            "hidden_dims": [512, 256, 128],
             "activation": "elu",
             "obs_normalization": True,
         },
@@ -78,40 +50,59 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=500)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
-    parser.add_argument(
-        "--resume",
-        type=pathlib.Path,
-        help="Resume training from a current MIT-mode RSL-RL checkpoint.",
-    )
-    parser.add_argument(
-        "--log-dir",
-        type=pathlib.Path,
-        default=PROJECT_ROOT / "runs" / "forge" / "puck-mit",
-    )
+    parser.add_argument("--resume", type=pathlib.Path, help="Resume from an existing model")
+    parser.add_argument("log_dir", type=pathlib.Path, nargs="?", default=None)
+    parser.add_argument("--video-every", type=int, default=20, help="Record a video every N iterations")
+    parser.add_argument("--video-len", type=float, default=4.0, help="Video length in seconds")
+
     args = parser.parse_args()
     if args.num_envs <= 0 or args.iterations <= 0:
         parser.error("--num-envs and --iterations must be positive")
     if args.resume is not None and not args.resume.is_file():
         parser.error(f"Checkpoint does not exist: {args.resume}")
-    if args.resume is not None and not is_current_policy_checkpoint(args.resume):
-        parser.error(
-            "Checkpoint is not from the current MIT-mode policy; "
-            "train a new checkpoint before resuming"
-        )
+    print(f"Setting up training with {args.num_envs} environments and {args.iterations} iterations on device {args.device}")
+
+    if args.log_dir is None:
+        base = PROJECT_ROOT / "runs" / datetime.datetime.now().strftime("%Y%m%d")
+        args.log_dir = base
+        for n in range(1, 1000):
+            if not (args.log_dir.exists() and any(args.log_dir.iterdir())):
+                break
+            args.log_dir = base.with_name(f"{base.name}-{n}")
+    assert isinstance(args.log_dir, pathlib.Path)
+    print(f"Logging to {args.log_dir}")
+    args.log_dir.mkdir(parents=True, exist_ok=True)
+
+    print("importing genesis...", end=" ", flush=True)
+    start = time.perf_counter()
+    import genesis as gs
+    print(f"Importing genesis took {time.perf_counter() - start:.2f} seconds")
+    from genesis_forge.wrappers import RslRlWrapper, VideoWrapper
+    from puck.env import PuckStandEnv
 
     if args.device == "cpu":
         torch.set_default_device("cpu")
         backend = gs.cpu
-    else:
-        backend = gs.gpu
+    else: backend = gs.gpu
+
     gs.init(backend=backend, seed=args.seed, logging_level="warning")
 
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-    env = RslRlWrapper(PuckStandEnv(num_envs=args.num_envs, headless=True))
+    video_env = VideoWrapper(
+        PuckStandEnv(num_envs=args.num_envs, headless=True),
+        camera_attr="camera",
+        video_length_sec=args.video_len,
+        iteration_trigger=lambda iter: (
+            iter > 0 and (iter % args.video_every == 0 or iter == args.iterations - 1)
+        ),
+        steps_per_iteration=training_config()["num_steps_per_env"],
+        out_dir=str(args.log_dir / "videos"),
+    )
+    env = RslRlWrapper(video_env)
     try:
         env.build()
         env.reset()
-        runner = PuckRunner(
+        from rsl_rl.runners import OnPolicyRunner
+        runner = OnPolicyRunner(
             env,
             copy.deepcopy(training_config(args.seed)),
             str(args.log_dir),
@@ -120,6 +111,7 @@ def main() -> None:
         if args.resume is not None:
             runner.load(str(args.resume))
             runner.current_learning_iteration += 1
+            video_env.iteration_offset = runner.current_learning_iteration
             print(f"Resuming training from {args.resume}")
         runner.learn(
             num_learning_iterations=args.iterations,
