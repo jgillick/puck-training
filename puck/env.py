@@ -44,7 +44,17 @@ STANDING_JOINT_POSITIONS = {
     "wheel_r": 0.0,
     "wheel_l": 0.0,
 }
+LEG_JOINT_NAMES = set(STANDING_JOINT_POSITIONS.keys()) - set(WHEEL_JOINT_NAMES)
 
+def leg_pose_outside_band(env) -> torch.Tensor:
+    assert isinstance(env, PuckStandEnv)
+    positions = env.actuator_manager.get_dofs_position()
+    leg_names = list(LEG_JOINT_NAMES)
+    indices = [env.actuator_manager.dofs_names.index(n) for n in leg_names]
+    targets = positions.new_tensor([STANDING_JOINT_POSITIONS[n] for n in leg_names])
+    tolerance = 0.15  # radians; tune to allow balancing motion
+    excess = torch.relu((positions[:, indices] - targets).abs() - tolerance)
+    return (excess / tolerance).square().mean(dim=1)
 
 class PuckRewardManager(RewardManager):
     """Keep the scalar reward returned to the trainer in the normalized range."""
@@ -254,6 +264,10 @@ class PuckStandEnv(ManagedEnvironment):
                 "hip_flexor_alignment": {
                     "weight": 1.0,
                     "fn": hip_flexor_alignment,
+                },
+                "leg_pose_outside_band": {
+                    "weight": -1.0,
+                    "fn": leg_pose_outside_band,
                 },
                 "body_angular_velocity": {
                     "weight": -0.02,
