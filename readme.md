@@ -4,6 +4,8 @@
 
 Puck is an 8DOF bipedal wheeled robot project. This is my attempt to train an RL policy to stand it up and balance!
 
+See also Puck's [MakerWorld design page](https://t413.com/go/puck-mw?ref=puckrl), [Firmware Flash](https://t413.com/p/projects/puck/?ref=puckrl) web tool, my [Discord](https://t413.com/go/discord?ref=puckrl).
+
 ![puck gif horizontal](https://t413.com/p/projects/puck/puck-horiz-small.gif)
 
 ## Setup
@@ -65,3 +67,31 @@ Puck is an 8DOF bipedal wheeled robot.
    * HeadBody yaw. Referenced in rad/s
    * Side velocity in m/s. This is the difficult one. It requres the robot to _step_ with its wheels lifting off the ground in sequence.
    * Eventually: actions like jump, hop, and behavior modifiers.
+
+Notes from jeremy, the creator of genesis-forge:
+
+- use PositionActionManager for limb joints (not wheels)
+   - make default position be with puck _standing_, wheels on the ground, in mid-height position.
+   - turn noise *off* until everything can stand, then reintroduce
+- turn video output on!
+   - env gets wrapped in video wrapper, trigger video every x number of iterations
+- use tensor board to view the logs. tails incoming logs
+- `"hidden_dims": [128, 128],` should be `[512, 256, 128]`. or more.
+- add VelocityCommandManager. now. start at slow vel target
+   * three: fwd, yaw, side. only fwd gets slow target
+- add general `self.height_command = CommandManager(self, range(0.1, 0.5))` value is _meters_
+- figure out where body 0,0 is. probably is important for height_command
+- ObservationManager should add 5 steps of history
+- Keep rewards _and_ observations values between -1 and 1. important.
+- cirriculum:
+   * get the system to where it can train to be standing first. Staning pose initial position, joints driven in position control will help get there.
+   * DO NOT start building a cirriculum until it can stand
+   * For future reference:
+   * cirriculum starts going when reward > threshold. eg forward velocity result
+   * ramps up difficulity:
+      - 1st step: run w/ height set to 0.5
+      - 2nd step: run with variable height. use `self.height_command`
+      - 2nd step is faster fwd.
+      - then reverse
+      - then rough terrain
+
