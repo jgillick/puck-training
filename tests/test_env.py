@@ -77,7 +77,7 @@ class PuckStandEnvTests(unittest.TestCase):
             {
                 "lin_vel_x": (0.0, 0.1),
                 "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (0.0, 0.0),
+                "ang_vel_z": (-0.1, 0.1),
             },
         )
 

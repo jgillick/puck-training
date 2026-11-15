@@ -55,11 +55,23 @@ def main() -> None:
                     observations, reward, dones, extras = env.step(actions)
                 total_reward += float(reward[0].item())
                 if bool(dones[0].item()):
-                    outcome = (
-                        "fell"
-                        if bool(extras["terminations"][0].item())
-                        else "timeout"
-                    )
+                    if bool(extras["terminations"][0].item()):
+                        termination_logs = extras.get(
+                            base_env.extras_logging_key, {}
+                        )
+                        reasons = [
+                            name
+                            for name in ("ground_contact", "bad_orientation")
+                            if float(
+                                termination_logs.get(
+                                    f"Terminations / {name}", 0.0
+                                )
+                            )
+                            > 0.0
+                        ]
+                        outcome = f"fell ({', '.join(reasons) or 'cause unknown'})"
+                    else:
+                        outcome = "timeout"
                     print(
                         f"Episode {episode}: reward={total_reward:.2f}, "
                         f"outcome={outcome}"
