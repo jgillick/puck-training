@@ -51,7 +51,7 @@ CURRICULUM_CHECK_EVERY_STEPS = 1200
 CURRICULUM_AVG_SAMPLES = 5
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 CURRICULUM_COOLDOWN_STEPS = 1200
-BASELINE_TRACKING_THRESHOLD = 0.8
+BASELINE_TRACKING_THRESHOLD = 0.6
 COMMAND_TRACKING_THRESHOLD = 0.5
 DIRECTIONAL_VELOCITY_STAGE = 2
 INITIAL_FORWARD_VELOCITY = 0.3
@@ -71,17 +71,6 @@ ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
 
-def leg_pose_outside_band(env) -> torch.Tensor:
-    assert isinstance(env, PuckStandEnv)
-    positions = env.actuator_manager.get_dofs_position()
-    leg_names = list(LEG_JOINT_NAMES)
-    indices = [env.actuator_manager.dofs_names.index(n) for n in leg_names]
-    targets = positions.new_tensor([STANDING_JOINT_POSITIONS[n] for n in leg_names])
-    tolerance = 0.15  # radians; tune to allow balancing motion
-    excess = torch.relu((positions[:, indices] - targets).abs() - tolerance)
-    return (excess / tolerance).square().mean(dim=1)
-
-
 def ground_contact_failure(env) -> torch.Tensor:
     contacts = env.robot.get_contacts(with_entity=env.terrain, is_padded=True)
     wheel_ids = torch.tensor(
@@ -97,13 +86,6 @@ def ground_contact_failure(env) -> torch.Tensor:
     )
     non_wheel_contacts = contacts["valid_mask"] & ~wheel_contacts
     return non_wheel_contacts.any(dim=1)
-
-
-class PuckRewardManager(RewardManager):
-    """Keep the scalar reward returned to the trainer in the normalized range."""
-
-    def step(self) -> torch.Tensor:
-        return super().step().clamp_(-1.0, 1.0)
 
 
 class PuckWheelTorqueActionManager(BaseActionManager):
@@ -144,6 +126,7 @@ class PuckStandEnv(ManagedEnvironment):
             num_envs=num_envs,
             dt=CONTROL_DT,
             max_episode_length_sec=max_episode_length_sec,
+            # max_episode_random_scaling=0.3,
         )
         self.curriculum_level = 0
         self.curriculum_samples: list[tuple[float, ...]] = []
@@ -224,6 +207,8 @@ class PuckStandEnv(ManagedEnvironment):
                 IDENTITY_QUATERNION, device=gs.device, dtype=gs.tc_float
             ).repeat(len(envs_idx), 1)
             entity.set_quat(quat, envs_idx=envs_idx, zero_velocity=True)
+
+        cmd_scale = torch.tensor([1/MAX_FORWARD_VELOCITY, 1/0.3, 1/0.3], device=gs.device)
 
         self.entity_manager = EntityManager(
             self,
@@ -328,15 +313,15 @@ class PuckStandEnv(ManagedEnvironment):
             return torch.exp(-errors.square().mean(dim=1))
 
 
-        self.reward_manager = PuckRewardManager(
+        self.reward_manager = RewardManager(
             self,
             cfg={
                 "forward_velocity": {
-                    "weight": 1.0,
+                    "weight": 2.0,
                     "fn": rewards.command_tracking_lin_vel(
                         vel_cmd_manager=self.velocity_command,
-                        sensitivity=0.01,
                         entity_manager=self.entity_manager,
+                        sensitivity=0.1,
                     ),
                 },
                 "upright": {
@@ -349,7 +334,6 @@ class PuckStandEnv(ManagedEnvironment):
                     "weight": 1.0,
                     "fn": rewards.command_tracking_ang_vel(
                         vel_cmd_manager=self.velocity_command,
-                        sensitivity=0.01,
                         entity_manager=self.entity_manager,
                     ),
                 },
@@ -377,10 +361,6 @@ class PuckStandEnv(ManagedEnvironment):
                     "weight": 1.0,
                     "fn": hip_flexor_alignment,
                 },
-                "leg_pose_outside_band": {
-                    "weight": -1.0,
-                    "fn": leg_pose_outside_band,
-                },
                 "height_tracking": {
                     "weight": 0.0,
                     "fn": rewards.base_height(
@@ -393,14 +373,10 @@ class PuckStandEnv(ManagedEnvironment):
                     "weight": -0.02,
                     "fn": rewards.ang_vel_xy_l2(entity_manager=self.entity_manager),
                 },
-                "body_linear_velocity": {
-                    "weight": -0.05,
-                    "fn": rewards.lin_vel_xy_l2(entity_manager=self.entity_manager),
-                },
-                "action_rate": {
-                    "weight": -0.04,
-                    "fn": rewards.action_rate_l2(),
-                },
+                # penalize high-frequency actions to encourage smooth control
+                "action_rate_limbs":    {"weight": -0.05, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
+                "action_rate_wheels":   {"weight": -0.1,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
+                "limb_dof_vel":         {"weight": -1e-3, "fn": rewards.dof_velocity_l2(action_manager=self.action_manager)},
                 "action_acceleration": {
                     "weight": -2e-04,
                     "fn": rewards.action_acceleration_l2(),
@@ -445,24 +421,10 @@ class PuckStandEnv(ManagedEnvironment):
                     "clip": (-1.0, 1.0),
                     "units": "m/s",
                 },
-                "joint_position": {
-                    "fn": lambda env: (
-                        self._add_observation_noise(
-                            self.actuator_manager.get_dofs_position(), 0.01
-                        )
-                    ),
-                    "scale": 1.0 / math.pi,
-                    "clip": (-1.0, 1.0),
-                    "units": "rad",
-                },
-                "joint_velocity": {
-                    "fn": lambda env: self._add_observation_noise(
-                        self.actuator_manager.get_dofs_velocity(), 0.1
-                    ),
-                    "scale": 0.01,
-                    "clip": (-1.0, 1.0),
-                    "units": "rad/s",
-                },
+                # use action_manager for joint only observations, not wheel joints. then add wheel velocity obs separately
+                "joint_position": {"fn": lambda env: self.action_manager.get_dofs_position(), "scale": 1/math.pi, "clip": (-1, 1)},
+                "joint_velocity": {"fn": lambda env: self.action_manager.get_dofs_velocity(), "scale": 0.01, "clip": (-1, 1)},
+                "wheel_velocity": {"fn": lambda env: self.wheel_action_manager.get_dofs_velocity(), "scale": 0.03, "clip": (-1, 1)},
                 "base_height": {
                     "fn": lambda env: (
                         self.entity_manager.base_pos[:, 2:3]
@@ -490,7 +452,7 @@ class PuckStandEnv(ManagedEnvironment):
                     "units": "normalized",
                 },
                 "velocity_command": {
-                    "fn": self.velocity_command.observation,
+                    "fn": lambda env: self.velocity_command.observation(env) * cmd_scale,
                     "scale": 10.0,
                     "clip": (-1.0, 1.0),
                 },
@@ -528,6 +490,8 @@ class PuckStandEnv(ManagedEnvironment):
         }
         self.velocity_command.resample_time_sec = 4.0 if directional else 5.0
         self.velocity_command.resample_command(self.all_envs_idx)
+        self.reward_manager["yaw_velocity"].weight = 1.0 if directional else 0.01
+        self.reward_manager["side_velocity"].weight = 0.5 if sideways else 0.01
 
         variable_attitude = self.curriculum_level >= VARIABLE_ATTITUDE_STAGE
         attitude_range = (
@@ -551,9 +515,6 @@ class PuckStandEnv(ManagedEnvironment):
         self.reward_manager["height_tracking"].weight = -5.0 if variable_height else 0.0
         self.reward_manager["upright"].weight = (
             0.0 if variable_attitude else -5.0
-        )
-        self.reward_manager["leg_pose_outside_band"].weight = (
-            0.0 if variable_height else -1.0
         )
         relaxed_legs = self.curriculum_level >= UNCONSTRAINED_LEGS_STAGE
         self.reward_manager["leg_symmetry"].weight = 0.0 if relaxed_legs else 1.0
