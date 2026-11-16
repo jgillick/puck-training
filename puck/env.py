@@ -38,11 +38,11 @@ LIMB_JOINT_NAMES = (
 WHEEL_JOINT_NAMES = ("wheel_r", "wheel_l")
 STANDING_JOINT_POSITIONS = {
     "flexor_r": 0.0,
-    "hip_r": math.pi / 4,
+    "hip_r": math.pi / 5, #5 not /4 for more fwd lean
+    "hip_l": -math.pi / 5,
     "knee_r": math.pi / 2,
-    "flexor_l": 0.0,
-    "hip_l": -math.pi / 4,
     "knee_l": -math.pi / 2,
+    "flexor_l": 0.0,
     "wheel_r": 0.0,
     "wheel_l": 0.0,
 }
@@ -53,10 +53,20 @@ CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 CURRICULUM_COOLDOWN_STEPS = 1200
 BASELINE_TRACKING_THRESHOLD = 0.8
 COMMAND_TRACKING_THRESHOLD = 0.5
+DIRECTIONAL_VELOCITY_STAGE = 2
+INITIAL_FORWARD_VELOCITY = 0.3
+MAX_FORWARD_VELOCITY = 2.0
+FORWARD_VELOCITY_INCREMENT = 0.1
 VARIABLE_HEIGHT_STAGE = 4
 SIDE_VELOCITY_STAGE = 5
 VARIABLE_ATTITUDE_STAGE = 6
 UNCONSTRAINED_LEGS_STAGE = 7
+MAX_CURRICULUM_LEVEL = DIRECTIONAL_VELOCITY_STAGE + int(
+    round(
+        (MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY)
+        / FORWARD_VELOCITY_INCREMENT
+    )
+)
 ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
 
@@ -204,7 +214,7 @@ class PuckStandEnv(ManagedEnvironment):
                     "fn": reset.randomize_terrain_position(
                         terrain_manager=self.terrain_manager,
                         height_offset=INITIAL_ROOT_POSITION[2],
-                        subterrain=self.curriculum_terrain,
+                        subterrain=lambda: self.curriculum_terrain,
                         rotation={"z": (0.0, 0.0)},
                     )
                 }
@@ -232,9 +242,12 @@ class PuckStandEnv(ManagedEnvironment):
         self.velocity_command = VelocityCommandManager(
             self,
             range={
-                "lin_vel_x": (0.0, 0.1),
+                "lin_vel_x": (
+                    INITIAL_FORWARD_VELOCITY,
+                    INITIAL_FORWARD_VELOCITY,
+                ),
                 "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-0.1, 0.1),
+                "ang_vel_z": (0.0, 0.0),
             },
         )
         self.height_command = CommandManager(self, range=(0.3, 0.3))
@@ -480,14 +493,24 @@ class PuckStandEnv(ManagedEnvironment):
         return "random_uniform_terrain" if self.curriculum_level >= 3 else "flat_terrain"
 
     def _apply_curriculum_stage(self) -> None:
-        directional = self.curriculum_level >= 2
+        directional = self.curriculum_level >= DIRECTIONAL_VELOCITY_STAGE
         sideways = self.curriculum_level >= SIDE_VELOCITY_STAGE
+        forward_velocity_limit = min(
+            INITIAL_FORWARD_VELOCITY
+            + max(0, self.curriculum_level - DIRECTIONAL_VELOCITY_STAGE)
+            * FORWARD_VELOCITY_INCREMENT,
+            MAX_FORWARD_VELOCITY,
+        )
         self.velocity_command.range = {
-            "lin_vel_x": (-0.1, 0.1) if directional else (0.0, 0.0),
+            "lin_vel_x": (
+                (-forward_velocity_limit, forward_velocity_limit)
+                if directional
+                else (INITIAL_FORWARD_VELOCITY, INITIAL_FORWARD_VELOCITY)
+            ),
             "lin_vel_y": (-0.1, 0.1) if sideways else (0.0, 0.0),
             "ang_vel_z": (-0.1, 0.1) if directional else (0.0, 0.0),
         }
-        self.velocity_command.resample_time_sec = 2.0 if directional else 5.0
+        self.velocity_command.resample_time_sec = 4.0 if directional else 5.0
         self.velocity_command.resample_command(self.all_envs_idx)
 
         variable_attitude = self.curriculum_level >= VARIABLE_ATTITUDE_STAGE
@@ -555,7 +578,7 @@ class PuckStandEnv(ManagedEnvironment):
         return forward, side, yaw, pitch, roll, height_error
 
     def _update_curriculum(self) -> None:
-        if self.curriculum_level >= UNCONSTRAINED_LEGS_STAGE:
+        if self.curriculum_level >= MAX_CURRICULUM_LEVEL:
             return
         if self.step_count < self.next_curriculum_check_step:
             return
@@ -581,11 +604,11 @@ class PuckStandEnv(ManagedEnvironment):
         )
         tracking_threshold = (
             BASELINE_TRACKING_THRESHOLD
-            if self.curriculum_level < 2
+            if self.curriculum_level < DIRECTIONAL_VELOCITY_STAGE
             else COMMAND_TRACKING_THRESHOLD
         )
         tracks_velocity = forward_avg > tracking_threshold
-        if self.curriculum_level >= 2:
+        if self.curriculum_level >= DIRECTIONAL_VELOCITY_STAGE:
             tracks_velocity = tracks_velocity and yaw_avg > tracking_threshold
         tracks_attitude = (
             pitch_avg > COMMAND_TRACKING_THRESHOLD
@@ -615,6 +638,9 @@ class PuckStandEnv(ManagedEnvironment):
         )
         episode = extras.setdefault("episode", {})
         episode["Curriculum / level"] = self.curriculum_level
+        episode["Curriculum / max_forward_velocity"] = self.velocity_command.range[
+            "lin_vel_x"
+        ][1]
         episode["Curriculum / observation_noise"] = int(self.curriculum_level >= 1)
         episode["Curriculum / rough_terrain"] = int(self.curriculum_level >= 3)
         episode["Curriculum / variable_height"] = int(

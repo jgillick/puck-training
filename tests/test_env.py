@@ -79,7 +79,7 @@ class PuckStandEnvTests(unittest.TestCase):
         self.assertEqual(
             self.env.velocity_command.range,
             {
-                "lin_vel_x": (0.0, 0.0),
+                "lin_vel_x": (0.05, 0.1),
                 "lin_vel_y": (0.0, 0.0),
                 "ang_vel_z": (0.0, 0.0),
             },
