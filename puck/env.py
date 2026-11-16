@@ -18,7 +18,7 @@ from genesis_forge.managers import (
     TerminationManager,
     VelocityCommandManager,
 )
-from genesis_forge.mdp import observations, reset, rewards, terminations
+from genesis_forge.mdp import observations, rewards, terminations
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
@@ -69,6 +69,7 @@ MAX_CURRICULUM_LEVEL = DIRECTIONAL_VELOCITY_STAGE + int(
 )
 ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
+CURRICULUM_SPAWN_USABLE_RATIO = 0.2
 
 def leg_pose_outside_band(env) -> torch.Tensor:
     assert isinstance(env, PuckStandEnv)
@@ -206,17 +207,30 @@ class PuckStandEnv(ManagedEnvironment):
     def config(self) -> None:
         """Configure standing-pose actions, commands, rewards, and observations."""
         self.terrain_manager = TerrainManager(self, terrain=self.terrain)
+
+        def reset_pose(env, entity, envs_idx) -> None:
+            pos = self.terrain_manager.generate_random_env_pos(
+                envs_idx=envs_idx,
+                usable_ratio=(
+                    0.0
+                    if self.curriculum_level == 0
+                    else CURRICULUM_SPAWN_USABLE_RATIO
+                ),
+                subterrain=self.curriculum_terrain,
+                height_offset=INITIAL_ROOT_POSITION[2],
+            )
+            entity.set_pos(pos, envs_idx=envs_idx, zero_velocity=True)
+            quat = torch.tensor(
+                IDENTITY_QUATERNION, device=gs.device, dtype=gs.tc_float
+            ).repeat(len(envs_idx), 1)
+            entity.set_quat(quat, envs_idx=envs_idx, zero_velocity=True)
+
         self.entity_manager = EntityManager(
             self,
             entity=self.robot,
             on_reset={
                 "pose": {
-                    "fn": reset.randomize_terrain_position(
-                        terrain_manager=self.terrain_manager,
-                        height_offset=INITIAL_ROOT_POSITION[2],
-                        subterrain=lambda: self.curriculum_terrain,
-                        rotation={"z": (0.0, 0.0)},
-                    )
+                    "fn": reset_pose
                 }
             },
         )
@@ -384,10 +398,12 @@ class PuckStandEnv(ManagedEnvironment):
                     "fn": rewards.lin_vel_xy_l2(entity_manager=self.entity_manager),
                 },
                 "action_rate": {
-                    "weight": -0.01,
-                    "fn": rewards.action_rate_l2(
-                        action_manager=self.action_manager
-                    ),
+                    "weight": -0.04,
+                    "fn": rewards.action_rate_l2(),
+                },
+                "action_acceleration": {
+                    "weight": -2e-04,
+                    "fn": rewards.action_acceleration_l2(),
                 },
             },
         )
