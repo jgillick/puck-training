@@ -51,8 +51,14 @@ CURRICULUM_CHECK_EVERY_STEPS = 1200
 CURRICULUM_AVG_SAMPLES = 5
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 CURRICULUM_COOLDOWN_STEPS = 1200
+BASELINE_TRACKING_THRESHOLD = 0.8
+COMMAND_TRACKING_THRESHOLD = 0.5
 VARIABLE_HEIGHT_STAGE = 4
-UNCONSTRAINED_LEGS_STAGE = 5
+SIDE_VELOCITY_STAGE = 5
+VARIABLE_ATTITUDE_STAGE = 6
+UNCONSTRAINED_LEGS_STAGE = 7
+ATTITUDE_TARGET_LIMIT = 0.15
+ATTITUDE_TRACKING_SCALE = 0.15
 
 def leg_pose_outside_band(env) -> torch.Tensor:
     assert isinstance(env, PuckStandEnv)
@@ -129,7 +135,7 @@ class PuckStandEnv(ManagedEnvironment):
             max_episode_length_sec=max_episode_length_sec,
         )
         self.curriculum_level = 0
-        self.curriculum_samples: list[tuple[float, float, float, float]] = []
+        self.curriculum_samples: list[tuple[float, ...]] = []
         self.next_curriculum_check_step = CURRICULUM_CHECK_EVERY_STEPS
         self._last_reset_mean_ep_length = 0.0
         self.scene = gs.Scene(
@@ -232,6 +238,9 @@ class PuckStandEnv(ManagedEnvironment):
             },
         )
         self.height_command = CommandManager(self, range=(0.3, 0.3))
+        self.attitude_command = CommandManager(
+            self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
+        )
 
         def hip_flexor_alignment(env) -> torch.Tensor:
             joint_positions = self.actuator_manager.get_dofs_position()
@@ -248,6 +257,27 @@ class PuckStandEnv(ManagedEnvironment):
             commanded_yaw_rate = self.velocity_command.command[:, 2]
             actual_yaw_rate = self.entity_manager.get_angular_velocity()[:, 2]
             return (actual_yaw_rate - commanded_yaw_rate).square()
+
+        def side_velocity_tracking(env) -> torch.Tensor:
+            target = self.velocity_command.command[:, 1]
+            actual = self.entity_manager.get_linear_velocity()[:, 1]
+            return torch.exp(-((actual - target) / 0.1).square())
+
+        def attitude_tracking(axis: str):
+            axis_index = {"roll": 0, "pitch": 1}[axis]
+
+            def reward(env) -> torch.Tensor:
+                body_rpy = gs.utils.geom.quat_to_xyz(
+                    self.entity_manager.base_quat, rpy=True
+                )
+                target = self.attitude_command.get_command(axis)
+                error = body_rpy[:, axis_index] - target
+                error = torch.atan2(torch.sin(error), torch.cos(error))
+                return torch.exp(
+                    -(error / ATTITUDE_TRACKING_SCALE).square()
+                )
+
+            return reward
 
         def hip_knee_symmetry_reward(env) -> torch.Tensor:
             '''Reward symmetrical hip & knee (values are inverted between l / r)'''
@@ -278,6 +308,7 @@ class PuckStandEnv(ManagedEnvironment):
                     "weight": 1.0,
                     "fn": rewards.command_tracking_lin_vel(
                         vel_cmd_manager=self.velocity_command,
+                        sensitivity=0.01,
                         entity_manager=self.entity_manager,
                     ),
                 },
@@ -291,8 +322,21 @@ class PuckStandEnv(ManagedEnvironment):
                     "weight": 1.0,
                     "fn": rewards.command_tracking_ang_vel(
                         vel_cmd_manager=self.velocity_command,
+                        sensitivity=0.01,
                         entity_manager=self.entity_manager,
                     ),
+                },
+                "side_velocity": {
+                    "weight": 0.5,
+                    "fn": side_velocity_tracking,
+                },
+                "pitch_tracking": {
+                    "weight": 1.0,
+                    "fn": attitude_tracking("pitch"),
+                },
+                "roll_tracking": {
+                    "weight": 1.0,
+                    "fn": attitude_tracking("roll"),
                 },
                 "yaw_rate_error": {
                     "weight": -0.5,
@@ -410,6 +454,12 @@ class PuckStandEnv(ManagedEnvironment):
                     "clip": (-1.0, 1.0),
                     "units": "normalized",
                 },
+                "attitude_command": {
+                    "fn": self.attitude_command.observation,
+                    "scale": 1.0 / ATTITUDE_TARGET_LIMIT,
+                    "clip": (-1.0, 1.0),
+                    "units": "normalized",
+                },
                 "velocity_command": {
                     "fn": self.velocity_command.observation,
                     "scale": 10.0,
@@ -431,19 +481,38 @@ class PuckStandEnv(ManagedEnvironment):
 
     def _apply_curriculum_stage(self) -> None:
         directional = self.curriculum_level >= 2
+        sideways = self.curriculum_level >= SIDE_VELOCITY_STAGE
         self.velocity_command.range = {
             "lin_vel_x": (-0.1, 0.1) if directional else (0.0, 0.0),
-            "lin_vel_y": (0.0, 0.0),
+            "lin_vel_y": (-0.1, 0.1) if sideways else (0.0, 0.0),
             "ang_vel_z": (-0.1, 0.1) if directional else (0.0, 0.0),
         }
         self.velocity_command.resample_time_sec = 2.0 if directional else 5.0
         self.velocity_command.resample_command(self.all_envs_idx)
+
+        variable_attitude = self.curriculum_level >= VARIABLE_ATTITUDE_STAGE
+        attitude_range = (
+            (-ATTITUDE_TARGET_LIMIT, ATTITUDE_TARGET_LIMIT)
+            if variable_attitude
+            else (0.0, 0.0)
+        )
+        self.attitude_command.range = {
+            "pitch": attitude_range,
+            "roll": attitude_range,
+        }
+        self.attitude_command.resample_time_sec = (
+            2.0 if variable_attitude else None
+        )
+        self.attitude_command.resample_command(self.all_envs_idx)
 
         variable_height = self.curriculum_level >= VARIABLE_HEIGHT_STAGE
         self.height_command.range = (0.1, 0.5) if variable_height else (0.3, 0.3)
         self.height_command.resample_time_sec = 2.0 if variable_height else None
         self.height_command.resample_command(self.all_envs_idx)
         self.reward_manager["height_tracking"].weight = -5.0 if variable_height else 0.0
+        self.reward_manager["upright"].weight = (
+            0.0 if variable_attitude else -5.0
+        )
         self.reward_manager["leg_pose_outside_band"].weight = (
             0.0 if variable_height else -1.0
         )
@@ -460,12 +529,21 @@ class PuckStandEnv(ManagedEnvironment):
             return value
         return value + torch.randn_like(value) * standard_deviation
 
-    def _curriculum_metrics(self) -> tuple[float, float, float]:
+    def _curriculum_metrics(self) -> tuple[float, float, float, float, float, float]:
         forward = self.reward_manager.last_episode_mean_reward(
             "forward_velocity", before_weight=True
         )
+        side = self.reward_manager.last_episode_mean_reward(
+            "side_velocity", before_weight=True
+        )
         yaw = self.reward_manager.last_episode_mean_reward(
             "yaw_velocity", before_weight=True
+        )
+        pitch = self.reward_manager.last_episode_mean_reward(
+            "pitch_tracking", before_weight=True
+        )
+        roll = self.reward_manager.last_episode_mean_reward(
+            "roll_tracking", before_weight=True
         )
         height_error = (
             self.reward_manager.last_episode_mean_reward(
@@ -474,7 +552,7 @@ class PuckStandEnv(ManagedEnvironment):
             if self.curriculum_level >= VARIABLE_HEIGHT_STAGE
             else 0.0
         )
-        return forward, yaw, height_error
+        return forward, side, yaw, pitch, roll, height_error
 
     def _update_curriculum(self) -> None:
         if self.curriculum_level >= UNCONSTRAINED_LEGS_STAGE:
@@ -488,16 +566,34 @@ class PuckStandEnv(ManagedEnvironment):
         if len(self.curriculum_samples) < CURRICULUM_AVG_SAMPLES:
             return
 
-        metrics = torch.tensor(self.curriculum_samples)
-        forward_avg, yaw_avg, height_error_avg, episode_length_avg = (
-            metrics.mean(dim=0).tolist()
-        )
+        averages = torch.tensor(self.curriculum_samples).mean(dim=0).tolist()
+        (
+            forward_avg,
+            side_avg,
+            yaw_avg,
+            pitch_avg,
+            roll_avg,
+            height_error_avg,
+            episode_length_avg,
+        ) = averages
         enough_survival = episode_length_avg >= (
             self.max_episode_length_steps * CURRICULUM_MIN_EPISODE_LENGTH_RATIO
         )
-        tracks_velocity = forward_avg > 0.8
+        tracking_threshold = (
+            BASELINE_TRACKING_THRESHOLD
+            if self.curriculum_level < 2
+            else COMMAND_TRACKING_THRESHOLD
+        )
+        tracks_velocity = forward_avg > tracking_threshold
         if self.curriculum_level >= 2:
-            tracks_velocity = tracks_velocity and yaw_avg > 0.8
+            tracks_velocity = tracks_velocity and yaw_avg > tracking_threshold
+        tracks_attitude = (
+            pitch_avg > COMMAND_TRACKING_THRESHOLD
+            and roll_avg > COMMAND_TRACKING_THRESHOLD
+        )
+        tracks_velocity = tracks_velocity and tracks_attitude
+        if self.curriculum_level >= SIDE_VELOCITY_STAGE:
+            tracks_velocity = tracks_velocity and side_avg > COMMAND_TRACKING_THRESHOLD
         if self.curriculum_level >= VARIABLE_HEIGHT_STAGE:
             tracks_velocity = tracks_velocity and height_error_avg < 0.01
 
@@ -523,6 +619,12 @@ class PuckStandEnv(ManagedEnvironment):
         episode["Curriculum / rough_terrain"] = int(self.curriculum_level >= 3)
         episode["Curriculum / variable_height"] = int(
             self.curriculum_level >= VARIABLE_HEIGHT_STAGE
+        )
+        episode["Curriculum / side_velocity"] = int(
+            self.curriculum_level >= SIDE_VELOCITY_STAGE
+        )
+        episode["Curriculum / attitude_targets"] = int(
+            self.curriculum_level >= VARIABLE_ATTITUDE_STAGE
         )
         return observations_batch, reward, terminated, truncated, extras
 

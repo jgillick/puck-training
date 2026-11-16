@@ -70,7 +70,7 @@ class PuckStandEnvTests(unittest.TestCase):
         self.assertTrue(torch.allclose(torques[1], lower))
 
     def test_commands_and_five_step_observations_are_normalized(self) -> None:
-        self.assertEqual(self.observations.shape, (2, 190))
+        self.assertEqual(self.observations.shape, (2, 200))
         self.assertTrue(torch.isfinite(self.observations).all())
         self.assertTrue(torch.all(self.observations <= 1.0))
         self.assertTrue(torch.all(self.observations >= -1.0))
@@ -83,6 +83,10 @@ class PuckStandEnvTests(unittest.TestCase):
                 "lin_vel_y": (0.0, 0.0),
                 "ang_vel_z": (0.0, 0.0),
             },
+        )
+        self.assertEqual(
+            self.env.attitude_command.range,
+            {"pitch": (0.0, 0.0), "roll": (0.0, 0.0)},
         )
         self.assertEqual(self.env.curriculum_terrain, "flat_terrain")
 
@@ -97,6 +101,18 @@ class PuckStandEnvTests(unittest.TestCase):
         self.assertEqual(self.env.curriculum_terrain, "flat_terrain")
         self.env.curriculum_level = 3
         self.assertEqual(self.env.curriculum_terrain, "random_uniform_terrain")
+        self.env.curriculum_level = 5
+        self.env._apply_curriculum_stage()
+        self.assertEqual(
+            self.env.velocity_command.range["lin_vel_y"], (-0.1, 0.1)
+        )
+        self.env.curriculum_level = 6
+        self.env._apply_curriculum_stage()
+        self.assertEqual(
+            self.env.attitude_command.range,
+            {"pitch": (-0.15, 0.15), "roll": (-0.15, 0.15)},
+        )
+        self.assertEqual(self.env.reward_manager["upright"].weight, 0.0)
 
     def test_curriculum_defers_leg_reward_removal_until_variable_height(self) -> None:
         self.assertNotEqual(
@@ -108,6 +124,8 @@ class PuckStandEnvTests(unittest.TestCase):
         self.assertNotEqual(
             self.env.reward_manager["leg_pose_outside_band"].weight, 0.0
         )
+        self.assertNotEqual(self.env.reward_manager["pitch_tracking"].weight, 0.0)
+        self.assertNotEqual(self.env.reward_manager["roll_tracking"].weight, 0.0)
 
         self.env.curriculum_level = 4
         self.env._apply_curriculum_stage()
@@ -121,7 +139,11 @@ class PuckStandEnvTests(unittest.TestCase):
         )
         self.assertLess(self.env.reward_manager["height_tracking"].weight, 0.0)
 
-        self.env.curriculum_level = 5
+        self.env.curriculum_level = 6
+        self.env._apply_curriculum_stage()
+        self.assertNotEqual(self.env.reward_manager["leg_symmetry"].weight, 0.0)
+
+        self.env.curriculum_level = 7
         self.env._apply_curriculum_stage()
         self.assertEqual(self.env.reward_manager["leg_symmetry"].weight, 0.0)
         self.assertEqual(
@@ -182,7 +204,7 @@ class PuckStandEnvTests(unittest.TestCase):
         for _ in range(10):
             observations, rewards, terminated, truncated, _ = self.env.step(actions)
             self.assertFalse(torch.any(terminated))
-        self.assertEqual(observations.shape, (2, 190))
+        self.assertEqual(observations.shape, (2, 200))
         self.assertTrue(torch.isfinite(observations).all())
         self.assertTrue(torch.all(observations <= 1.0))
         self.assertTrue(torch.all(observations >= -1.0))
