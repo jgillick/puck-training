@@ -2,6 +2,7 @@
 
 import math, pathlib, typing
 from collections.abc import Sequence
+import numpy as np
 import torch
 import genesis as gs
 from genesis_forge import ManagedEnvironment
@@ -13,6 +14,7 @@ from genesis_forge.managers import (
     ObservationManager,
     PositionActionManager,
     RewardManager,
+    TerrainManager,
     TerminationManager,
     VelocityCommandManager,
 )
@@ -45,6 +47,12 @@ STANDING_JOINT_POSITIONS = {
     "wheel_l": 0.0,
 }
 LEG_JOINT_NAMES = set(STANDING_JOINT_POSITIONS.keys()) - set(WHEEL_JOINT_NAMES)
+CURRICULUM_CHECK_EVERY_STEPS = 1200
+CURRICULUM_AVG_SAMPLES = 5
+CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
+CURRICULUM_COOLDOWN_STEPS = 1200
+VARIABLE_HEIGHT_STAGE = 4
+UNCONSTRAINED_LEGS_STAGE = 5
 
 def leg_pose_outside_band(env) -> torch.Tensor:
     assert isinstance(env, PuckStandEnv)
@@ -55,6 +63,24 @@ def leg_pose_outside_band(env) -> torch.Tensor:
     tolerance = 0.15  # radians; tune to allow balancing motion
     excess = torch.relu((positions[:, indices] - targets).abs() - tolerance)
     return (excess / tolerance).square().mean(dim=1)
+
+
+def ground_contact_failure(env) -> torch.Tensor:
+    contacts = env.robot.get_contacts(with_entity=env.terrain, is_padded=True)
+    wheel_ids = torch.tensor(
+        [
+            env.robot.get_link("wheel").idx,
+            env.robot.get_link("wheel_2").idx,
+        ],
+        device=gs.device,
+    )
+    wheel_contacts = (
+        (contacts["link_a"].unsqueeze(-1) == wheel_ids).any(dim=-1)
+        | (contacts["link_b"].unsqueeze(-1) == wheel_ids).any(dim=-1)
+    )
+    non_wheel_contacts = contacts["valid_mask"] & ~wheel_contacts
+    return non_wheel_contacts.any(dim=1)
+
 
 class PuckRewardManager(RewardManager):
     """Keep the scalar reward returned to the trainer in the normalized range."""
@@ -102,6 +128,10 @@ class PuckStandEnv(ManagedEnvironment):
             dt=CONTROL_DT,
             max_episode_length_sec=max_episode_length_sec,
         )
+        self.curriculum_level = 0
+        self.curriculum_samples: list[tuple[float, float, float, float]] = []
+        self.next_curriculum_check_step = CURRICULUM_CHECK_EVERY_STEPS
+        self._last_reset_mean_ep_length = 0.0
         self.scene = gs.Scene(
             show_viewer=not headless,
             vis_options=gs.options.VisOptions(rendered_envs_idx=[0]),
@@ -112,7 +142,30 @@ class PuckStandEnv(ManagedEnvironment):
                 enable_joint_limit=True,
             ),
         )
-        self.terrain = self.scene.add_entity(gs.morphs.Plane())
+        terrain_pixels = (np.indices((192, 384)) // 8).sum(axis=0) % 2
+        terrain_texture = np.empty((192, 384, 3), dtype=np.uint8)
+        terrain_texture[terrain_pixels == 0] = (62, 74, 80)
+        terrain_texture[terrain_pixels == 1] = (84, 96, 100)
+        self.terrain = self.scene.add_entity(
+            surface=gs.surfaces.Default(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_array=terrain_texture
+                )
+            ),
+            morph=gs.morphs.Terrain(
+                n_subterrains=(1, 2),
+                subterrain_size=(48, 24),
+                subterrain_types=[["flat_terrain", "random_uniform_terrain"]],
+                subterrain_parameters={
+                    "random_uniform_terrain": {
+                        "min_height": 0.0,
+                        "max_height": 0.08,
+                        "step": 0.04,
+                        "downsampled_scale": 0.25,
+                    },
+                },
+            ),
+        )
         self.robot = self.scene.add_entity(
             gs.morphs.MJCF(
                 file=str(ROBOT_MODEL_PATH),
@@ -136,14 +189,17 @@ class PuckStandEnv(ManagedEnvironment):
 
     def config(self) -> None:
         """Configure standing-pose actions, commands, rewards, and observations."""
+        self.terrain_manager = TerrainManager(self, terrain=self.terrain)
         self.entity_manager = EntityManager(
             self,
             entity=self.robot,
             on_reset={
                 "pose": {
-                    "fn": reset.position(
-                        position=INITIAL_ROOT_POSITION,
-                        quat=IDENTITY_QUATERNION,
+                    "fn": reset.randomize_terrain_position(
+                        terrain_manager=self.terrain_manager,
+                        height_offset=INITIAL_ROOT_POSITION[2],
+                        subterrain=self.curriculum_terrain,
+                        rotation={"z": (0.0, 0.0)},
                     )
                 }
             },
@@ -175,22 +231,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "ang_vel_z": (-0.1, 0.1),
             },
         )
-        self.height_command = CommandManager(self, range=(0.1, 0.5))
-
-        def ground_contact_failure(env) -> torch.Tensor:
-            contacts = self.robot.get_contacts(with_entity=self.terrain, is_padded=True)
-            wheel_ids = torch.tensor(
-                [
-                    self.robot.get_link("wheel").idx,
-                    self.robot.get_link("wheel_2").idx,
-                ],
-                device=gs.device,
-            )
-            wheel_contacts = (
-                contacts["link_b"].unsqueeze(-1) == wheel_ids
-            ).any(dim=-1)
-            non_wheel_contacts = contacts["valid_mask"] & ~wheel_contacts
-            return non_wheel_contacts.any(dim=1)
+        self.height_command = CommandManager(self, range=(0.3, 0.3))
 
         def hip_flexor_alignment(env) -> torch.Tensor:
             joint_positions = self.actuator_manager.get_dofs_position()
@@ -230,7 +271,7 @@ class PuckStandEnv(ManagedEnvironment):
             return torch.exp(-errors.square().mean(dim=1))
 
 
-        PuckRewardManager(
+        self.reward_manager = PuckRewardManager(
             self,
             cfg={
                 "forward_velocity": {
@@ -269,6 +310,14 @@ class PuckStandEnv(ManagedEnvironment):
                     "weight": -1.0,
                     "fn": leg_pose_outside_band,
                 },
+                "height_tracking": {
+                    "weight": 0.0,
+                    "fn": rewards.base_height(
+                        height_command=self.height_command,
+                        terrain_manager=self.terrain_manager,
+                        entity_manager=self.entity_manager,
+                    ),
+                },
                 "body_angular_velocity": {
                     "weight": -0.02,
                     "fn": rewards.ang_vel_xy_l2(entity_manager=self.entity_manager),
@@ -302,38 +351,53 @@ class PuckStandEnv(ManagedEnvironment):
             self,
             cfg={
                 "projected_gravity": {
-                    "fn": lambda env: self.entity_manager.get_projected_gravity(),
+                    "fn": lambda env: self._add_observation_noise(
+                        self.entity_manager.get_projected_gravity(), 0.01
+                    ),
                     "clip": (-1.0, 1.0),
                 },
                 "body_angular_velocity": {
-                    "fn": lambda env: self.entity_manager.get_angular_velocity(),
+                    "fn": lambda env: self._add_observation_noise(
+                        self.entity_manager.get_angular_velocity(), 0.01
+                    ),
                     "scale": 0.2,
                     "clip": (-1.0, 1.0),
                     "units": "rad/s",
                 },
                 "body_linear_velocity": {
-                    "fn": lambda env: self.entity_manager.get_linear_velocity(),
+                    "fn": lambda env: self._add_observation_noise(
+                        self.entity_manager.get_linear_velocity(), 0.01
+                    ),
                     "scale": 0.5,
                     "clip": (-1.0, 1.0),
                     "units": "m/s",
                 },
                 "joint_position": {
                     "fn": lambda env: (
-                        self.actuator_manager.get_dofs_position()
+                        self._add_observation_noise(
+                            self.actuator_manager.get_dofs_position(), 0.01
+                        )
                     ),
                     "scale": 1.0 / math.pi,
                     "clip": (-1.0, 1.0),
                     "units": "rad",
                 },
                 "joint_velocity": {
-                    "fn": lambda env: self.actuator_manager.get_dofs_velocity(),
+                    "fn": lambda env: self._add_observation_noise(
+                        self.actuator_manager.get_dofs_velocity(), 0.1
+                    ),
                     "scale": 0.01,
                     "clip": (-1.0, 1.0),
                     "units": "rad/s",
                 },
                 "base_height": {
                     "fn": lambda env: (
-                        self.entity_manager.base_pos[:, 2:3] - 0.3
+                        self.entity_manager.base_pos[:, 2:3]
+                        - self.terrain_manager.get_terrain_height(
+                            self.entity_manager.base_pos[:, 0],
+                            self.entity_manager.base_pos[:, 1],
+                        ).unsqueeze(-1)
+                        - 0.3
                     )
                     / 0.2,
                     "clip": (-1.0, 1.0),
@@ -359,6 +423,108 @@ class PuckStandEnv(ManagedEnvironment):
             history_len=5,
             noise=0.0,
         )
+        self._apply_curriculum_stage()
+
+    @property
+    def curriculum_terrain(self) -> str:
+        return "random_uniform_terrain" if self.curriculum_level >= 3 else "flat_terrain"
+
+    def _apply_curriculum_stage(self) -> None:
+        directional = self.curriculum_level >= 2
+        self.velocity_command.range = {
+            "lin_vel_x": (-0.1, 0.1) if directional else (0.0, 0.0),
+            "lin_vel_y": (0.0, 0.0),
+            "ang_vel_z": (-0.1, 0.1) if directional else (0.0, 0.0),
+        }
+        self.velocity_command.resample_time_sec = 2.0 if directional else 5.0
+        self.velocity_command.resample_command(self.all_envs_idx)
+
+        variable_height = self.curriculum_level >= VARIABLE_HEIGHT_STAGE
+        self.height_command.range = (0.1, 0.5) if variable_height else (0.3, 0.3)
+        self.height_command.resample_time_sec = 2.0 if variable_height else None
+        self.height_command.resample_command(self.all_envs_idx)
+        self.reward_manager["height_tracking"].weight = -5.0 if variable_height else 0.0
+        self.reward_manager["leg_pose_outside_band"].weight = (
+            0.0 if variable_height else -1.0
+        )
+        relaxed_legs = self.curriculum_level >= UNCONSTRAINED_LEGS_STAGE
+        self.reward_manager["leg_symmetry"].weight = 0.0 if relaxed_legs else 1.0
+        self.reward_manager["hip_flexor_alignment"].weight = (
+            0.0 if relaxed_legs else 1.0
+        )
+
+    def _add_observation_noise(
+        self, value: torch.Tensor, standard_deviation: float
+    ) -> torch.Tensor:
+        if self.curriculum_level < 1:
+            return value
+        return value + torch.randn_like(value) * standard_deviation
+
+    def _curriculum_metrics(self) -> tuple[float, float, float]:
+        forward = self.reward_manager.last_episode_mean_reward(
+            "forward_velocity", before_weight=True
+        )
+        yaw = self.reward_manager.last_episode_mean_reward(
+            "yaw_velocity", before_weight=True
+        )
+        height_error = (
+            self.reward_manager.last_episode_mean_reward(
+                "height_tracking", before_weight=True
+            )
+            if self.curriculum_level >= VARIABLE_HEIGHT_STAGE
+            else 0.0
+        )
+        return forward, yaw, height_error
+
+    def _update_curriculum(self) -> None:
+        if self.curriculum_level >= UNCONSTRAINED_LEGS_STAGE:
+            return
+        if self.step_count < self.next_curriculum_check_step:
+            return
+
+        self.curriculum_samples.append(
+            (*self._curriculum_metrics(), self._last_reset_mean_ep_length)
+        )
+        if len(self.curriculum_samples) < CURRICULUM_AVG_SAMPLES:
+            return
+
+        metrics = torch.tensor(self.curriculum_samples)
+        forward_avg, yaw_avg, height_error_avg, episode_length_avg = (
+            metrics.mean(dim=0).tolist()
+        )
+        enough_survival = episode_length_avg >= (
+            self.max_episode_length_steps * CURRICULUM_MIN_EPISODE_LENGTH_RATIO
+        )
+        tracks_velocity = forward_avg > 0.8
+        if self.curriculum_level >= 2:
+            tracks_velocity = tracks_velocity and yaw_avg > 0.8
+        if self.curriculum_level >= VARIABLE_HEIGHT_STAGE:
+            tracks_velocity = tracks_velocity and height_error_avg < 0.01
+
+        if tracks_velocity and enough_survival:
+            self.curriculum_level += 1
+            self._apply_curriculum_stage()
+            self.next_curriculum_check_step = (
+                self.step_count + CURRICULUM_COOLDOWN_STEPS
+            )
+        else:
+            self.next_curriculum_check_step = (
+                self.step_count + CURRICULUM_CHECK_EVERY_STEPS
+            )
+        self.curriculum_samples.clear()
+
+    def step(self, actions: torch.Tensor):
+        observations_batch, reward, terminated, truncated, extras = super().step(
+            actions
+        )
+        episode = extras.setdefault("episode", {})
+        episode["Curriculum / level"] = self.curriculum_level
+        episode["Curriculum / observation_noise"] = int(self.curriculum_level >= 1)
+        episode["Curriculum / rough_terrain"] = int(self.curriculum_level >= 3)
+        episode["Curriculum / variable_height"] = int(
+            self.curriculum_level >= VARIABLE_HEIGHT_STAGE
+        )
+        return observations_batch, reward, terminated, truncated, extras
 
     def build(self) -> None:
         super().build()
@@ -370,6 +536,16 @@ class PuckStandEnv(ManagedEnvironment):
             )
 
     def reset(self, env_ids: torch.Tensor | Sequence[int] | None = None):
+        if env_ids is not None:
+            reset_ids_for_metrics = (
+                env_ids
+                if isinstance(env_ids, torch.Tensor)
+                else torch.as_tensor(env_ids, device=gs.device, dtype=torch.long)
+            )
+            if len(reset_ids_for_metrics) > 0:
+                self._last_reset_mean_ep_length = (
+                    self.episode_length[reset_ids_for_metrics].float().mean().item()
+                )
         observations_batch, info = super().reset(env_ids)
 
         if env_ids is None:
@@ -394,6 +570,8 @@ class PuckStandEnv(ManagedEnvironment):
         self.robot.zero_all_dofs_velocity(reset_ids)
         self.entity_manager.step()
 
+        if env_ids is not None and len(reset_ids) > 0:
+            self._update_curriculum()
         if env_ids is None:
             observations_batch = self.get_observations()
         return observations_batch, info

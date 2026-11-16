@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import genesis as gs
 import torch
@@ -8,6 +9,7 @@ from puck.env import (
     LIMB_JOINT_NAMES,
     STANDING_JOINT_POSITIONS,
     PuckStandEnv,
+    ground_contact_failure,
 )
 
 
@@ -23,6 +25,8 @@ class PuckStandEnvTests(unittest.TestCase):
         cls.env.close()
 
     def setUp(self) -> None:
+        self.env.curriculum_level = 0
+        self.env._apply_curriculum_stage()
         self.observations, _ = self.env.reset()
 
     def test_position_actions_default_to_the_mirrored_standing_pose(self) -> None:
@@ -71,15 +75,86 @@ class PuckStandEnvTests(unittest.TestCase):
         self.assertTrue(torch.all(self.observations <= 1.0))
         self.assertTrue(torch.all(self.observations >= -1.0))
         self.assertEqual(self.env.observation_manager._history_len, 5)
-        self.assertEqual(self.env.height_command.range, (0.1, 0.5))
+        self.assertEqual(self.env.height_command.range, (0.3, 0.3))
         self.assertEqual(
             self.env.velocity_command.range,
             {
-                "lin_vel_x": (0.0, 0.1),
+                "lin_vel_x": (0.0, 0.0),
                 "lin_vel_y": (0.0, 0.0),
-                "ang_vel_z": (-0.1, 0.1),
+                "ang_vel_z": (0.0, 0.0),
             },
         )
+        self.assertEqual(self.env.curriculum_terrain, "flat_terrain")
+
+        self.env.curriculum_level = 2
+        self.env._apply_curriculum_stage()
+        self.assertEqual(
+            self.env.velocity_command.range["lin_vel_x"], (-0.1, 0.1)
+        )
+        self.assertEqual(
+            self.env.velocity_command.range["ang_vel_z"], (-0.1, 0.1)
+        )
+        self.assertEqual(self.env.curriculum_terrain, "flat_terrain")
+        self.env.curriculum_level = 3
+        self.assertEqual(self.env.curriculum_terrain, "random_uniform_terrain")
+
+    def test_curriculum_defers_leg_reward_removal_until_variable_height(self) -> None:
+        self.assertNotEqual(
+            self.env.reward_manager["leg_symmetry"].weight, 0.0
+        )
+        self.assertNotEqual(
+            self.env.reward_manager["hip_flexor_alignment"].weight, 0.0
+        )
+        self.assertNotEqual(
+            self.env.reward_manager["leg_pose_outside_band"].weight, 0.0
+        )
+
+        self.env.curriculum_level = 4
+        self.env._apply_curriculum_stage()
+        self.assertEqual(self.env.height_command.range, (0.1, 0.5))
+        self.assertEqual(
+            self.env.reward_manager["leg_pose_outside_band"].weight, 0.0
+        )
+        self.assertNotEqual(self.env.reward_manager["leg_symmetry"].weight, 0.0)
+        self.assertNotEqual(
+            self.env.reward_manager["hip_flexor_alignment"].weight, 0.0
+        )
+        self.assertLess(self.env.reward_manager["height_tracking"].weight, 0.0)
+
+        self.env.curriculum_level = 5
+        self.env._apply_curriculum_stage()
+        self.assertEqual(self.env.reward_manager["leg_symmetry"].weight, 0.0)
+        self.assertEqual(
+            self.env.reward_manager["hip_flexor_alignment"].weight, 0.0
+        )
+
+    def test_ground_contact_failure_recognizes_wheels_on_either_contact_side(self) -> None:
+        wheel_ids = {
+            "wheel": self.env.robot.get_link("wheel").idx,
+            "wheel_2": self.env.robot.get_link("wheel_2").idx,
+        }
+        body_id = self.env.robot.get_link("body").idx
+        terrain_id = self.env.terrain.links[0].idx
+        fake_robot = SimpleNamespace(
+            get_link=lambda name: SimpleNamespace(idx=wheel_ids[name]),
+            get_contacts=lambda **kwargs: contacts,
+        )
+        fake_env = SimpleNamespace(robot=fake_robot, terrain=self.env.terrain)
+
+        for link_a, link_b, expected in (
+            (wheel_ids["wheel"], terrain_id, False),
+            (terrain_id, wheel_ids["wheel_2"], False),
+            (body_id, terrain_id, True),
+            (terrain_id, body_id, True),
+        ):
+            contacts = {
+                "link_a": torch.tensor([[link_a]], device=gs.device),
+                "link_b": torch.tensor([[link_b]], device=gs.device),
+                "valid_mask": torch.tensor([[True]], device=gs.device),
+            }
+            self.assertEqual(
+                bool(ground_contact_failure(fake_env)[0]), expected
+            )
 
     def test_reset_restores_standing_pose_and_partial_reset(self) -> None:
         positions_before = self.env._as_batch(self.env.robot.get_pos()).clone()
@@ -104,7 +179,9 @@ class PuckStandEnvTests(unittest.TestCase):
 
     def test_step_returns_bounded_rewards_and_observations(self) -> None:
         actions = torch.zeros((2, 8), device=gs.device)
-        observations, rewards, terminated, truncated, _ = self.env.step(actions)
+        for _ in range(10):
+            observations, rewards, terminated, truncated, _ = self.env.step(actions)
+            self.assertFalse(torch.any(terminated))
         self.assertEqual(observations.shape, (2, 190))
         self.assertTrue(torch.isfinite(observations).all())
         self.assertTrue(torch.all(observations <= 1.0))

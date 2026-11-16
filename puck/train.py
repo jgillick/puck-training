@@ -52,8 +52,8 @@ def main() -> None:
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--resume", type=pathlib.Path, help="Resume from an existing model")
     parser.add_argument("log_dir", type=pathlib.Path, nargs="?", default=None)
-    parser.add_argument("--video-every", type=int, default=20, help="Record a video every N iterations")
-    parser.add_argument("--video-len", type=float, default=4.0, help="Video length in seconds")
+    parser.add_argument("--video-every", type=int, default=25, help="Record a video every N iterations")
+    parser.add_argument("--video-len", type=float, default=10.0, help="Video length in seconds")
 
     args = parser.parse_args()
     if args.num_envs <= 0 or args.iterations <= 0:
@@ -92,9 +92,10 @@ def main() -> None:
         camera_attr="camera",
         video_length_sec=args.video_len,
         iteration_trigger=lambda iter: (
-            iter > 0 and (iter % args.video_every == 0 or iter == args.iterations - 1)
+            iter > 0 and iter % args.video_every == 0
         ),
         steps_per_iteration=training_config()["num_steps_per_env"],
+        wait_for_episode_start=True,
         out_dir=str(args.log_dir / "videos"),
     )
     env = RslRlWrapper(video_env)
