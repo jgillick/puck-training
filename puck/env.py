@@ -24,7 +24,7 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
 CONTROL_DT = 1 / 50
 INITIAL_ROOT_POSITION = (0.0, 0.0, 0.23) #(x,y,z) height (m) offset caused by STANDING_JOINT_POSITIONS
-IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
+IDENTITY_QUATERNION = (math.pi/2, 0.0, 0.0, math.pi/2) # rotated 180 degrees
 INITIAL_LIMB_KP = 5.0
 INITIAL_LIMB_KD = 1.0
 LIMB_JOINT_NAMES = (
@@ -38,8 +38,8 @@ LIMB_JOINT_NAMES = (
 WHEEL_JOINT_NAMES = ("wheel_r", "wheel_l")
 STANDING_JOINT_POSITIONS = {
     "flexor_r": 0.0,
-    "hip_r": math.pi / 5, #5 not /4 for more fwd lean
-    "hip_l": -math.pi / 5,
+    "hip_r": math.pi / 4,
+    "hip_l": -math.pi / 4,
     "knee_r": math.pi / 2,
     "knee_l": -math.pi / 2,
     "flexor_l": 0.0,
