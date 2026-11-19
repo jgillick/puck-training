@@ -47,7 +47,7 @@ def training_config(seed: int = 0) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--num-envs", type=int, default=2048)
-    parser.add_argument("--iterations", type=int, default=2000)
+    parser.add_argument("--iterations", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--resume", type=pathlib.Path, help="Resume from an existing model")
