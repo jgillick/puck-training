@@ -87,8 +87,11 @@ def main() -> None:
 
     gs.init(backend=backend, seed=args.seed, logging_level="warning")
 
+    puckenv = PuckStandEnv(num_envs=args.num_envs, headless=True)
+    puckenv.periodic_outfile = args.log_dir / "log.txt"
+    puckenv.log(f"Training with {args.num_envs} environments and {args.iterations} iterations on device {args.device}")
     video_env = VideoWrapper(
-        PuckStandEnv(num_envs=args.num_envs, headless=True),
+        puckenv,
         camera_attr="camera",
         video_length_sec=args.video_len,
         iteration_trigger=lambda iter: (

@@ -203,6 +203,7 @@ class PuckStandEnv(ManagedEnvironment):
             fixed_axis=(None, None, 0.9),  # keep the camera at a steady height
             smoothing=0.9,
         )
+        self.periodic_outfile : pathlib.Path | None = None
 
     def config(self) -> None:
         """Configure standing-pose actions, commands, rewards, and observations."""
@@ -580,14 +581,11 @@ class PuckStandEnv(ManagedEnvironment):
         if track_ok and enough_survival:
             self.curriculum_level += 1
             self._apply_curriculum_stage()
-            self.next_curriculum_check_step = (
-                self.step_count + CURRICULUM_COOLDOWN_STEPS
-            )
-            print(f"Curriculum advanced to level {self.curriculum_level} at step {self.step_count}. avgs: {averages}")
+            self.next_curriculum_check_step = (self.step_count + CURRICULUM_COOLDOWN_STEPS)
+            self.log(f"Curriculum BUMP avgs: {averages}")
         else:
-            self.next_curriculum_check_step = (
-                self.step_count + CURRICULUM_CHECK_EVERY_STEPS
-            )
+            self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
+            self.log(f"Curriculum hold: track-{'ok' if track_ok else 'bad'} len {averages.episode_length:0.1f} avgs: {averages}")
         self.curriculum_samples.clear()
 
     def step(self, actions: torch.Tensor):
@@ -665,3 +663,15 @@ class PuckStandEnv(ManagedEnvironment):
     @staticmethod
     def _as_batch(value: torch.Tensor) -> torch.Tensor:
         return value.unsqueeze(0) if value.ndim == 1 else value
+
+    def stagename(self) -> str:
+        return Stage(min(self.curriculum_level, Stage.Max)).name + f"({self.curriculum_level})"
+    def logbase(self, * args, **kwargs) -> None:
+        if self.periodic_outfile:
+            with open(self.periodic_outfile, 'a') as f:
+                print(*args, **kwargs, file=f)
+        print(*args, **kwargs)
+    def log(self, * args, **kwargs) -> None:
+        # report learning iteration
+        self.logbase(f"training@[c{self.stagename()}|{self.curriculum_level} s{self.step_count}] ", *args, **kwargs)
+
