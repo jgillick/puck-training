@@ -78,11 +78,12 @@ class CurriculumMetrics:
     height: float
     episode_length: float
 
-    def tracks_baseline(self, threshold: float) -> bool:
+    def tracks_baseline(self, threshold: float) -> list[str]:
+        failing = []
         for field in dataclasses.fields(self):
             if field.name == 'episode_length': continue
-            if getattr(self, field.name) <= threshold: return False
-        return True
+            if getattr(self, field.name) <= threshold: failing.append(field.name)
+        return failing
 
 def ground_contact_failure(env) -> torch.Tensor:
     contacts = env.robot.get_contacts(with_entity=env.terrain, is_padded=True)
@@ -275,6 +276,10 @@ class PuckStandEnv(ManagedEnvironment):
             self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
         )
 
+        def square_linear_error(error: torch.Tensor, scale: float) -> torch.Tensor:
+            '''exponential reward with additial linear penalty to provide gradient pressure for large errors'''
+            return torch.exp(-(error / scale).square()) - 0.1 * (error.abs() / scale)
+
         def hip_flexor_alignment(env) -> torch.Tensor:
             joint_positions = self.actuator_manager.get_dofs_position()
             flexor_indices = [
@@ -289,18 +294,17 @@ class PuckStandEnv(ManagedEnvironment):
         def forward_velocity_tracking(env) -> torch.Tensor:
             target = self.velocity_command.command[:, 1]
             actual = self.entity_manager.get_linear_velocity()[:, 1]
-            return torch.exp(
-                -((actual - target) / VELOCITY_TRACKING_SENSITIVITY).square()
-            )
+            return square_linear_error(-(actual - target), VELOCITY_TRACKING_SENSITIVITY)
+
         def side_velocity_tracking(env) -> torch.Tensor:
             target = self.velocity_command.command[:, 0]
             actual = self.entity_manager.get_linear_velocity()[:, 0]
-            return torch.exp(-((actual - target) / VELOCITY_TRACKING_SENSITIVITY).square())
+            return square_linear_error(actual - target, VELOCITY_TRACKING_SENSITIVITY)
 
         def yaw_velocity_tracking(env) -> torch.Tensor:
             target = self.velocity_command.command[:, 2]
             actual = self.entity_manager.get_angular_velocity()[:, 2]
-            return torch.exp(-((actual - target) / YAW_TRACKING_SENSITIVITY).square())
+            return square_linear_error(actual - target, YAW_TRACKING_SENSITIVITY)
 
         def attitude_tracking(axis: str):
             axis_index = {"roll": 0, "pitch": 1}[axis]
@@ -320,8 +324,7 @@ class PuckStandEnv(ManagedEnvironment):
         def height_tracking(env) -> torch.Tensor:
             target = self.height_command.command.reshape(-1)
             actual = self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1])
-            error = actual - target
-            return torch.exp(-(error / HEIGHT_TRACKING_SENSITIVITY).square())
+            return square_linear_error(-(actual - target), HEIGHT_TRACKING_SENSITIVITY)
 
         def hip_knee_symmetry_reward(env) -> torch.Tensor:
             '''Reward symmetrical hip & knee (values are inverted between l / r)'''
@@ -524,14 +527,14 @@ class PuckStandEnv(ManagedEnvironment):
         averages: CurriculumMetrics = CurriculumMetrics(*average_values)
 
         enough_survival = averages.episode_length >= (CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0))
-        track_ok = averages.tracks_baseline(MIN_TRACKING_THRESHOLD)
+        track_fails = averages.tracks_baseline(MIN_TRACKING_THRESHOLD)
 
-        if track_ok and enough_survival:
+        if not track_fails and enough_survival:
             self.curriculum_level += 1
             self._apply_curriculum_stage()
             self.log(f"Curriculum BUMP avgs: {averages}")
         else:
-            self.log(f"Curriculum hold: track-{'ok' if track_ok else 'bad'} len {averages.episode_length:0.1f} avgs: {averages}")
+            self.log(f"Curriculum hold: track-{'ok' if not track_fails else ','.join(track_fails)} len {averages.episode_length:0.1f} avgs: {averages}")
         self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
         self.curriculum_samples.clear()
 
