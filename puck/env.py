@@ -366,18 +366,9 @@ class PuckStandEnv(ManagedEnvironment):
                 "leg_symmetry":         { "weight": 1.0, "fn": hip_knee_symmetry_reward },
                 "hip_flexor_alignment": { "weight": 1.5, "fn": hip_flexor_alignment },
                 "height_tracking":      { "weight": 3.0, "fn": height_tracking },
-                "body_angular_velocity": {
-                    "weight": -0.02,
-                    "fn": rewards.ang_vel_xy_l2(entity_manager=self.entity_manager),
-                },
                 # penalize high-frequency actions to encourage smooth control
-                "action_rate_limbs":    {"weight": -0.02, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
+                "`action_rate_limbs`":    {"weight": -0.02, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
                 "action_rate_wheels":   {"weight": -0.05,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
-                "limb_dof_vel":         {"weight": -1e-3, "fn": rewards.dof_velocity_l2(action_manager=self.action_manager)},
-                "action_acceleration": {
-                    "weight": -2e-04,
-                    "fn": rewards.action_acceleration_l2(),
-                },
             },
         )
         TerminationManager(
