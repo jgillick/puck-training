@@ -47,7 +47,7 @@ INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 1.0 #m/s
 MAX_YAW_VELOCITY = 5.0 #rad/s
-TRAINING_VELOCITY_INCREMENTS = 0.1
+TRAINING_VELOCITY_INCREMENTS = 0.2
 VELOCITY_TRACKING_SENSITIVITY = 0.2 #m/s
 HEIGHT_TRACKING_SENSITIVITY = 0.1 #m
 YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
@@ -55,7 +55,8 @@ YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
 class Stage(enum.IntEnum):
     INITIAL = 0
     ADD_NOISE = 1
-    BIDIRECTIONAL_FORWARD = 2
+    FWD_CMD = 2
+    FWDBACK_CMD = 3
     YAW_COMMAND = 4
     SIDE_VELOCITY = 7
     VARIABLE_HEIGHT = 10
@@ -370,8 +371,8 @@ class PuckStandEnv(ManagedEnvironment):
                     "fn": rewards.ang_vel_xy_l2(entity_manager=self.entity_manager),
                 },
                 # penalize high-frequency actions to encourage smooth control
-                "action_rate_limbs":    {"weight": -0.05, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
-                "action_rate_wheels":   {"weight": -0.1,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
+                "action_rate_limbs":    {"weight": -0.02, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
+                "action_rate_wheels":   {"weight": -0.05,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
                 "limb_dof_vel":         {"weight": -1e-3, "fn": rewards.dof_velocity_l2(action_manager=self.action_manager)},
                 "action_acceleration": {
                     "weight": -2e-04,
@@ -444,15 +445,12 @@ class PuckStandEnv(ManagedEnvironment):
         return "random_uniform_terrain" if self.curriculum_level >= Stage.ROUGH_TERRAIN else "flat_terrain"
 
     def _apply_curriculum_stage(self) -> None:
-        directional = self.curriculum_level >= Stage.BIDIRECTIONAL_FORWARD
+        directional = self.curriculum_level >= Stage.FWD_CMD
         yaw_enabled = self.curriculum_level >= Stage.YAW_COMMAND
         sideways = self.curriculum_level >= Stage.SIDE_VELOCITY
 
-        forward_velocity_limit = min(
-            MAX_FORWARD_VELOCITY,
-            INITIAL_FORWARD_VELOCITY + max(0, self.curriculum_level - Stage.BIDIRECTIONAL_FORWARD) * TRAINING_VELOCITY_INCREMENTS
-        )
-        reverse_velocity_limit = min(INITIAL_FORWARD_VELOCITY, max(0, self.curriculum_level - Stage.BIDIRECTIONAL_FORWARD + 1) * 0.05) #ramp up reverse
+        forward_velocity_limit = min(MAX_FORWARD_VELOCITY, INITIAL_FORWARD_VELOCITY + max(0, self.curriculum_level - Stage.FWD_CMD) * TRAINING_VELOCITY_INCREMENTS)
+        reverse_velocity_limit = min(INITIAL_FORWARD_VELOCITY, max(0, self.curriculum_level - Stage.FWDBACK_CMD + 1) * TRAINING_VELOCITY_INCREMENTS)
         side_velocity_limit = min(
             MAX_SIDE_VELOCITY,
             max(0, self.curriculum_level - Stage.SIDE_VELOCITY + 1) * TRAINING_VELOCITY_INCREMENTS
@@ -466,7 +464,7 @@ class PuckStandEnv(ManagedEnvironment):
             "lin_vel_y": (-forward_velocity_limit, reverse_velocity_limit) if directional else (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY),
             "ang_vel_z": (-yaw_velocity_limit, yaw_velocity_limit) if yaw_enabled else (0.0, 0.0),
         }
-        self.velocity_command.resample_time_sec = 4.0 if directional else 5.0
+        self.velocity_command.resample_time_sec = 2.0
         self.velocity_command.resample_command(self.all_envs_idx)
 
         variable_attitude = self.curriculum_level >= Stage.VARIABLE_ATTITUDE
@@ -550,7 +548,7 @@ class PuckStandEnv(ManagedEnvironment):
             return 0.0
 
         # report command max/min values if enabled
-        if self.curriculum_level >= Stage.BIDIRECTIONAL_FORWARD:
+        if self.curriculum_level >= Stage.FWD_CMD:
             episode["Curriculum/velcmd max"] = rval(self.velocity_command.range, 'lin_vel_y')
         if self.curriculum_level >= Stage.YAW_COMMAND:
             episode["Curriculum/yaw max"] = rval(self.velocity_command.range, "ang_vel_z")
