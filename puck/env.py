@@ -37,13 +37,12 @@ STANDING_JOINT_POSITIONS = {
     "knee_l": -math.pi / 2,
     "flexor_l": 0.0,
 }
-CURRICULUM_CHECK_EVERY_STEPS = 1200
+CURRICULUM_CHECK_EVERY_STEPS = 600
 CURRICULUM_AVG_SAMPLES = 5
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
-CURRICULUM_COOLDOWN_STEPS = 1200
 MIN_TRACKING_THRESHOLD = 0.8 #threshold for tracking performance to advance curriculum
-HEIGHT_MID = INITIAL_ROOT_POSITION[2] #(m)
-HEIGHT_RANGE_SCALE = 0.2 #scaling factor
+HEIGHT_COMMAND_MINMAX = (0.1, 0.5)
+HEIGHT_MID = INITIAL_ROOT_POSITION[2]
 INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 1.0 #m/s
@@ -271,7 +270,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "ang_vel_z": (0.0, 0.0),
             },
         )
-        self.height_command = CommandManager(self, range=(HEIGHT_MID, HEIGHT_MID)) #fixed target at initial height
+        self.height_command = CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
         self.attitude_command = CommandManager(
             self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
         )
@@ -361,8 +360,8 @@ class PuckStandEnv(ManagedEnvironment):
                 "pitch_tracking":       { "weight": 1.0, "fn": attitude_tracking("pitch") },
                 "roll_tracking":        { "weight": 1.0, "fn": attitude_tracking("roll") },
                 "leg_symmetry":         { "weight": 1.0, "fn": hip_knee_symmetry_reward },
-                "hip_flexor_alignment": { "weight": 1.0, "fn": hip_flexor_alignment },
-                "height_tracking":      { "weight": 1.0, "fn": height_tracking },
+                "hip_flexor_alignment": { "weight": 1.3, "fn": hip_flexor_alignment },
+                "height_tracking":      { "weight": 1.2, "fn": height_tracking },
                 "body_angular_velocity": {
                     "weight": -0.02,
                     "fn": rewards.ang_vel_xy_l2(entity_manager=self.entity_manager),
@@ -396,6 +395,10 @@ class PuckStandEnv(ManagedEnvironment):
                 data.ang_vel * 0.2,
                 data.lin_acc / 9.81,
             ), dim=-1)
+
+        HEIGHT_COMMAND_MID = (HEIGHT_COMMAND_MINMAX[1] + HEIGHT_COMMAND_MINMAX[0]) / 2
+        HEIGHT_RANGE_SCALE = (HEIGHT_COMMAND_MINMAX[1] - HEIGHT_COMMAND_MINMAX[0]) / 2
+
         self.observation_manager = ObservationManager(
             self,
             cfg={
@@ -409,7 +412,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "wheel_velocity": {"fn": lambda env: self.wheel_action_manager.get_dofs_velocity(), "scale": 0.03, "clip": (-1, 1)},
                 # TODO: all motor drive torques!?
                 "height_command": {
-                    "fn": lambda env: (self.height_command.command - HEIGHT_MID) / HEIGHT_RANGE_SCALE,
+                    "fn": lambda env: (self.height_command.command - HEIGHT_COMMAND_MID) / HEIGHT_RANGE_SCALE,
                     "clip": (-1.0, 1.0),
                     "units": "normalized",
                 },
@@ -479,12 +482,13 @@ class PuckStandEnv(ManagedEnvironment):
         self.attitude_command.resample_command(self.all_envs_idx)
 
         variable_height = self.curriculum_level >= Stage.VARIABLE_HEIGHT
-        self.height_command.range = (0.1, 0.5) if variable_height else (HEIGHT_MID, HEIGHT_MID)
+        self.height_command.range = HEIGHT_COMMAND_MINMAX if variable_height else (HEIGHT_MID, HEIGHT_MID)
         self.height_command.resample_time_sec = 2.0 if variable_height else None
         self.height_command.resample_command(self.all_envs_idx)
-        relaxed_legs = self.curriculum_level >= Stage.YAW_COMMAND
-        self.reward_manager["leg_symmetry"].weight          = 0.0 if relaxed_legs else 1.0
-        self.reward_manager["hip_flexor_alignment"].weight  = 0.0 if relaxed_legs else 1.0
+        if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.0:
+            self.log(f"relaxed legs enabled")
+            sym.weight = 0.0
+            self.reward_manager["hip_flexor_alignment"].weight  = 0.0
 
     def _add_observation_noise(
         self, value: torch.Tensor, standard_deviation: float
@@ -525,11 +529,10 @@ class PuckStandEnv(ManagedEnvironment):
         if track_ok and enough_survival:
             self.curriculum_level += 1
             self._apply_curriculum_stage()
-            self.next_curriculum_check_step = (self.step_count + CURRICULUM_COOLDOWN_STEPS)
             self.log(f"Curriculum BUMP avgs: {averages}")
         else:
-            self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
             self.log(f"Curriculum hold: track-{'ok' if track_ok else 'bad'} len {averages.episode_length:0.1f} avgs: {averages}")
+        self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
         self.curriculum_samples.clear()
 
     def step(self, actions: torch.Tensor):
