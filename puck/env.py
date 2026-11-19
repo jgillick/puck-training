@@ -623,7 +623,10 @@ class PuckStandEnv(ManagedEnvironment):
         return value.unsqueeze(0) if value.ndim == 1 else value
 
     def stagename(self) -> str:
-        return Stage(min(self.curriculum_level, Stage.Max)).name + f"({self.curriculum_level})"
+        try:
+            return Stage(min(self.curriculum_level, Stage.Max)).name + f"({self.curriculum_level})"
+        except ValueError:
+            return f"Stage({self.curriculum_level})"
     def logbase(self, * args, **kwargs) -> None:
         if self.periodic_outfile:
             with open(self.periodic_outfile, 'a') as f:
