@@ -360,8 +360,8 @@ class PuckStandEnv(ManagedEnvironment):
                 "pitch_tracking":       { "weight": 1.0, "fn": attitude_tracking("pitch") },
                 "roll_tracking":        { "weight": 1.0, "fn": attitude_tracking("roll") },
                 "leg_symmetry":         { "weight": 1.0, "fn": hip_knee_symmetry_reward },
-                "hip_flexor_alignment": { "weight": 1.3, "fn": hip_flexor_alignment },
-                "height_tracking":      { "weight": 1.2, "fn": height_tracking },
+                "hip_flexor_alignment": { "weight": 1.5, "fn": hip_flexor_alignment },
+                "height_tracking":      { "weight": 3.0, "fn": height_tracking },
                 "body_angular_velocity": {
                     "weight": -0.02,
                     "fn": rewards.ang_vel_xy_l2(entity_manager=self.entity_manager),
@@ -559,8 +559,10 @@ class PuckStandEnv(ManagedEnvironment):
             episode["Curriculum/pitch max"] = rval(self.attitude_command.range, 'pitch')
             episode["Curriculum/roll max"] = rval(self.attitude_command.range, 'roll')
 
-        # report mean height
-        episode["Diagnostics/height"] = self.entity_manager.base_pos[:, 2].mean().item() - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1]).mean().item()
+        actual_height = (self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1]))
+        episode["Diagnostics/height"] = actual_height.mean().item()
+        episode["Diagnostics/height_target"] = self.height_command.command.mean().item()
+        episode["Diagnostics/height_error"] = (actual_height - self.height_command.command.reshape(-1)).mean().item()
         return observations_batch, reward, terminated, truncated, extras
 
     def build(self) -> None:
