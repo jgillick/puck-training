@@ -1,6 +1,6 @@
 """Genesis Forge environment for teaching Puck to stand and balance."""
 
-import math, pathlib, typing
+import math, pathlib, enum, dataclasses
 from collections.abc import Sequence
 import numpy as np
 import torch
@@ -52,28 +52,41 @@ CURRICULUM_CHECK_EVERY_STEPS = 1200
 CURRICULUM_AVG_SAMPLES = 5
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 CURRICULUM_COOLDOWN_STEPS = 1200
-BASELINE_TRACKING_THRESHOLD = 0.6
-COMMAND_TRACKING_THRESHOLD = 0.5
-DIRECTIONAL_VELOCITY_STAGE = 2
-ROUGH_TERRAIN_STAGE = 7
+MIN_TRACKING_THRESHOLD = 0.8 #threshold for tracking performance to advance curriculum
 INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 1.0 #m/s
 MAX_YAW_VELOCITY = 5.0 #rad/s
 TRAINING_VELOCITY_INCREMENTS = 0.1
-VARIABLE_HEIGHT_STAGE = 4
-SIDE_VELOCITY_STAGE = 5
-VARIABLE_ATTITUDE_STAGE = 6
-UNCONSTRAINED_LEGS_STAGE = 7
-MAX_CURRICULUM_LEVEL = DIRECTIONAL_VELOCITY_STAGE + int(
-    round(
-        (MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY)
-        / TRAINING_VELOCITY_INCREMENTS
-    )
-)
+VELOCITY_TRACKING_SENSITIVITY = 0.1 #m/s
+YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
+# Staging:
+class Stage(enum.IntEnum):
+    INITIAL = 0
+    ADD_NOISE = 1
+    BIDIRECTIONAL_FORWARD = 2
+    YAW_COMMAND = 4
+    SIDE_VELOCITY = 7
+    VARIABLE_HEIGHT = 10
+    VARIABLE_ATTITUDE = 12
+    UNCONSTRAINED_LEGS = 14
+    ROUGH_TERRAIN = 16
+    Max = 17
+
+MAX_CURRICULUM_LEVEL = Stage.Max + math.ceil((MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY) / TRAINING_VELOCITY_INCREMENTS)
 ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
+
+@dataclasses.dataclass
+class CurriculumMetrics:
+    forward: float
+    side: float
+    yaw: float
+    pitch: float
+    roll: float
+    height_error: float
+    episode_length: float
 
 def ground_contact_failure(env) -> torch.Tensor:
     contacts = env.robot.get_contacts(with_entity=env.terrain, is_padded=True)
@@ -133,7 +146,7 @@ class PuckStandEnv(ManagedEnvironment):
             # max_episode_random_scaling=0.3,
         )
         self.curriculum_level = 0
-        self.curriculum_samples: list[tuple[float, ...]] = []
+        self.curriculum_samples: list[CurriculumMetrics] = []
         self.next_curriculum_check_step = CURRICULUM_CHECK_EVERY_STEPS
         self._last_reset_mean_ep_length = 0.0
         self.scene = gs.Scene(
@@ -269,8 +282,6 @@ class PuckStandEnv(ManagedEnvironment):
             excess = torch.relu(max_flexor_angle - tolerance)
             return torch.exp(-4.0 * (excess / tolerance).square())
 
-        VELOCITY_TRACKING_SENSITIVITY = 0.1
-
         def forward_velocity_tracking(env) -> torch.Tensor:
             target = self.velocity_command.command[:, 1]
             actual = self.entity_manager.get_linear_velocity()[:, 1]
@@ -281,6 +292,11 @@ class PuckStandEnv(ManagedEnvironment):
             target = self.velocity_command.command[:, 0]
             actual = self.entity_manager.get_linear_velocity()[:, 0]
             return torch.exp(-((actual - target) / VELOCITY_TRACKING_SENSITIVITY).square())
+
+        def yaw_velocity_tracking(env) -> torch.Tensor:
+            target = self.velocity_command.command[:, 2]
+            actual = self.entity_manager.get_angular_velocity()[:, 2]
+            return torch.exp(-((actual - target) / YAW_TRACKING_SENSITIVITY).square())
 
         def attitude_tracking(axis: str):
             axis_index = {"roll": 0, "pitch": 1}[axis]
@@ -330,10 +346,7 @@ class PuckStandEnv(ManagedEnvironment):
                 },
                 "yaw_velocity": {
                     "weight": 1.0,
-                    "fn": rewards.command_tracking_ang_vel(
-                        vel_cmd_manager=self.velocity_command,
-                        entity_manager=self.entity_manager,
-                    ),
+                    "fn": yaw_velocity_tracking,
                 },
                 "forward_velocity": {
                     "weight": 1.0,
@@ -465,35 +478,35 @@ class PuckStandEnv(ManagedEnvironment):
 
     @property
     def curriculum_terrain(self) -> str:
-        return "random_uniform_terrain" if self.curriculum_level >= ROUGH_TERRAIN_STAGE else "flat_terrain"
+        return "random_uniform_terrain" if self.curriculum_level >= Stage.ROUGH_TERRAIN else "flat_terrain"
 
     def _apply_curriculum_stage(self) -> None:
-        directional = self.curriculum_level >= DIRECTIONAL_VELOCITY_STAGE
-        sideways = self.curriculum_level >= SIDE_VELOCITY_STAGE
+        directional = self.curriculum_level >= Stage.BIDIRECTIONAL_FORWARD
+        yaw_enabled = self.curriculum_level >= Stage.YAW_COMMAND
+        sideways = self.curriculum_level >= Stage.SIDE_VELOCITY
+
         forward_velocity_limit = min(
             MAX_FORWARD_VELOCITY,
-            INITIAL_FORWARD_VELOCITY + max(0, self.curriculum_level - DIRECTIONAL_VELOCITY_STAGE) * TRAINING_VELOCITY_INCREMENTS
+            INITIAL_FORWARD_VELOCITY + max(0, self.curriculum_level - Stage.BIDIRECTIONAL_FORWARD) * TRAINING_VELOCITY_INCREMENTS
         )
-        # also scale up side velocity and yaw rate by TRAINING_VELOCITY_INCREMENTS
         side_velocity_limit = min(
             MAX_SIDE_VELOCITY,
-            max(0, self.curriculum_level - SIDE_VELOCITY_STAGE + 1) * TRAINING_VELOCITY_INCREMENTS
+            max(0, self.curriculum_level - Stage.SIDE_VELOCITY + 1) * TRAINING_VELOCITY_INCREMENTS
         )
         yaw_velocity_limit = min(
             MAX_YAW_VELOCITY,
-            max(0, self.curriculum_level - DIRECTIONAL_VELOCITY_STAGE + 1) * TRAINING_VELOCITY_INCREMENTS
+            max(0, self.curriculum_level - Stage.BIDIRECTIONAL_FORWARD + 1) * TRAINING_VELOCITY_INCREMENTS
         )
         self.velocity_command.range = {
             "lin_vel_x": (-side_velocity_limit, side_velocity_limit) if sideways else (0.0, 0.0),
             "lin_vel_y": (-forward_velocity_limit, forward_velocity_limit) if directional else (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY),
-            "ang_vel_z": (-yaw_velocity_limit, yaw_velocity_limit) if directional else (0.0, 0.0),
+            "ang_vel_z": (-yaw_velocity_limit, yaw_velocity_limit) if yaw_enabled else (0.0, 0.0),
         }
         self.velocity_command.resample_time_sec = 4.0 if directional else 5.0
         self.velocity_command.resample_command(self.all_envs_idx)
-        self.reward_manager["yaw_velocity"].weight = 1.0 if directional else 0.01
-        self.reward_manager["side_velocity"].weight = 0.5 if sideways else 0.01
+        self.reward_manager["side_velocity"].weight = 1.0 if sideways else 0.01
 
-        variable_attitude = self.curriculum_level >= VARIABLE_ATTITUDE_STAGE
+        variable_attitude = self.curriculum_level >= Stage.VARIABLE_ATTITUDE
         attitude_range = (
             (-ATTITUDE_TARGET_LIMIT, ATTITUDE_TARGET_LIMIT)
             if variable_attitude
@@ -508,7 +521,7 @@ class PuckStandEnv(ManagedEnvironment):
         )
         self.attitude_command.resample_command(self.all_envs_idx)
 
-        variable_height = self.curriculum_level >= VARIABLE_HEIGHT_STAGE
+        variable_height = self.curriculum_level >= Stage.VARIABLE_HEIGHT
         self.height_command.range = (0.1, 0.5) if variable_height else (0.3, 0.3)
         self.height_command.resample_time_sec = 2.0 if variable_height else None
         self.height_command.resample_command(self.all_envs_idx)
@@ -516,7 +529,7 @@ class PuckStandEnv(ManagedEnvironment):
         self.reward_manager["upright"].weight = (
             0.0 if variable_attitude else -5.0
         )
-        relaxed_legs = self.curriculum_level >= UNCONSTRAINED_LEGS_STAGE
+        relaxed_legs = self.curriculum_level >= Stage.UNCONSTRAINED_LEGS
         self.reward_manager["leg_symmetry"].weight = 0.0 if relaxed_legs else 1.0
         self.reward_manager["hip_flexor_alignment"].weight = (
             0.0 if relaxed_legs else 1.0
@@ -529,30 +542,16 @@ class PuckStandEnv(ManagedEnvironment):
             return value
         return value + torch.randn_like(value) * standard_deviation
 
-    def _curriculum_metrics(self) -> tuple[float, float, float, float, float, float]:
-        forward = self.reward_manager.last_episode_mean_reward(
-            "forward_velocity", before_weight=True
+    def _curriculum_metrics(self) -> CurriculumMetrics:
+        return CurriculumMetrics(
+            forward = self.reward_manager.last_episode_mean_reward("forward_velocity", before_weight=True),
+            side =    self.reward_manager.last_episode_mean_reward("side_velocity", before_weight=True),
+            yaw =     self.reward_manager.last_episode_mean_reward("yaw_velocity", before_weight=True),
+            pitch =   self.reward_manager.last_episode_mean_reward("pitch_tracking", before_weight=True),
+            roll =    self.reward_manager.last_episode_mean_reward("roll_tracking", before_weight=True),
+            height_error = self.reward_manager.last_episode_mean_reward("height_tracking", before_weight=True) if self.curriculum_level >= Stage.VARIABLE_HEIGHT else 0.0,
+            episode_length=self._last_reset_mean_ep_length,
         )
-        side = self.reward_manager.last_episode_mean_reward(
-            "side_velocity", before_weight=True
-        )
-        yaw = self.reward_manager.last_episode_mean_reward(
-            "yaw_velocity", before_weight=True
-        )
-        pitch = self.reward_manager.last_episode_mean_reward(
-            "pitch_tracking", before_weight=True
-        )
-        roll = self.reward_manager.last_episode_mean_reward(
-            "roll_tracking", before_weight=True
-        )
-        height_error = (
-            self.reward_manager.last_episode_mean_reward(
-                "height_tracking", before_weight=True
-            )
-            if self.curriculum_level >= VARIABLE_HEIGHT_STAGE
-            else 0.0
-        )
-        return forward, side, yaw, pitch, roll, height_error
 
     def _update_curriculum(self) -> None:
         if self.curriculum_level >= MAX_CURRICULUM_LEVEL:
@@ -560,49 +559,31 @@ class PuckStandEnv(ManagedEnvironment):
         if self.step_count < self.next_curriculum_check_step:
             return
 
-        self.curriculum_samples.append(
-            (*self._curriculum_metrics(), self._last_reset_mean_ep_length)
-        )
+        self.curriculum_samples.append(self._curriculum_metrics())
         if len(self.curriculum_samples) < CURRICULUM_AVG_SAMPLES:
             return
 
-        averages = torch.tensor(self.curriculum_samples).mean(dim=0).tolist()
-        (
-            forward_avg,
-            side_avg,
-            yaw_avg,
-            pitch_avg,
-            roll_avg,
-            height_error_avg,
-            episode_length_avg,
-        ) = averages
-        enough_survival = episode_length_avg >= (
+        average_values = torch.tensor(
+            [dataclasses.astuple(sample) for sample in self.curriculum_samples]
+        ).mean(dim=0).tolist()
+        averages: CurriculumMetrics = CurriculumMetrics(*average_values)
+        enough_survival = averages.episode_length >= (
             CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0)
         )
-        tracking_threshold = (
-            BASELINE_TRACKING_THRESHOLD
-            if self.curriculum_level < DIRECTIONAL_VELOCITY_STAGE
-            else COMMAND_TRACKING_THRESHOLD
-        )
-        tracks_velocity = forward_avg > tracking_threshold
-        if self.curriculum_level >= DIRECTIONAL_VELOCITY_STAGE:
-            tracks_velocity = tracks_velocity and yaw_avg > tracking_threshold
-        tracks_attitude = (
-            pitch_avg > COMMAND_TRACKING_THRESHOLD
-            and roll_avg > COMMAND_TRACKING_THRESHOLD
-        )
-        tracks_velocity = tracks_velocity and tracks_attitude
-        if self.curriculum_level >= SIDE_VELOCITY_STAGE:
-            tracks_velocity = tracks_velocity and side_avg > COMMAND_TRACKING_THRESHOLD
-        if self.curriculum_level >= VARIABLE_HEIGHT_STAGE:
-            tracks_velocity = tracks_velocity and height_error_avg < 0.01
+        tracks_fwd = averages.forward > MIN_TRACKING_THRESHOLD
+        tracks_yaw = averages.yaw > MIN_TRACKING_THRESHOLD
+        tracks_attitude = averages.pitch > MIN_TRACKING_THRESHOLD and averages.roll > MIN_TRACKING_THRESHOLD
+        tracks_height = averages.height_error < 0.01
 
-        if tracks_velocity and enough_survival:
+        track_ok = tracks_fwd and tracks_yaw and tracks_attitude and tracks_height
+
+        if track_ok and enough_survival:
             self.curriculum_level += 1
             self._apply_curriculum_stage()
             self.next_curriculum_check_step = (
                 self.step_count + CURRICULUM_COOLDOWN_STEPS
             )
+            print(f"Curriculum advanced to level {self.curriculum_level} at step {self.step_count}. avgs: {averages}")
         else:
             self.next_curriculum_check_step = (
                 self.step_count + CURRICULUM_CHECK_EVERY_STEPS
@@ -619,15 +600,15 @@ class PuckStandEnv(ManagedEnvironment):
             "lin_vel_y"
         ][1]
         episode["Curriculum / observation_noise"] = int(self.curriculum_level >= 1)
-        episode["Curriculum / rough_terrain"] = int(self.curriculum_level >= 3)
+        episode["Curriculum / rough_terrain"] = int(self.curriculum_level >= Stage.ROUGH_TERRAIN)
         episode["Curriculum / variable_height"] = int(
-            self.curriculum_level >= VARIABLE_HEIGHT_STAGE
+            self.curriculum_level >= Stage.VARIABLE_HEIGHT
         )
         episode["Curriculum / side_velocity"] = int(
-            self.curriculum_level >= SIDE_VELOCITY_STAGE
+            self.curriculum_level >= Stage.SIDE_VELOCITY
         )
         episode["Curriculum / attitude_targets"] = int(
-            self.curriculum_level >= VARIABLE_ATTITUDE_STAGE
+            self.curriculum_level >= Stage.VARIABLE_ATTITUDE
         )
         return observations_batch, reward, terminated, truncated, extras
 
