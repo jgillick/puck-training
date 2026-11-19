@@ -1,82 +1,142 @@
-"""Drive a trained Puck policy with the arrow keys.
+import argparse, pathlib, time
 
-Up/Down: forward/back    Left/Right: turn
-Run from the project root:  uv run python runsim.py runs/<date>/model_X.pt
-"""
-import argparse, pathlib, torch
-import genesis as gs
-from pynput import keyboard
-from genesis_forge.wrappers import RslRlWrapper
-from rsl_rl.runners import OnPolicyRunner
-from puck.env import PuckStandEnv
-from puck.train import training_config
+class KeyboardController:
+    """Optional WASD / arrow-key velocity controller (requires pynput)."""
 
-Key = keyboard.Key
-pressed: set = set()   # written by the listener thread, read by the control loop
+    def __init__(self, command_manager):
+        from pynput import keyboard
 
-def on_press(key):
-    print(f"Key pressed: {key}")
-    pressed.add(key)
+        self.manager = command_manager
+        self.keys = set()
+        self.names = list(command_manager.range.keys())
+        self.listener = keyboard.Listener(
+            on_press=self._press, on_release=self._release
+        )
+        self.listener.start()
 
-def on_release(key):
-    pressed.discard(key)
+    def _press(self, key):
+        try:
+            self.keys.add(key.char.lower())
+        except AttributeError:
+            self.keys.add(key)
 
-def make_controller(vel):
-    """Build the command tensor from held keys, each step."""
-    rng = vel.range
-    print(f"make_controller rng={rng}")
+    def _release(self, key):
+        try:
+            self.keys.discard(key.char.lower())
+        except AttributeError:
+            self.keys.discard(key)
 
-    def controller(_step):
-        print(f"controller pressed={pressed}")
-        cmd = torch.zeros_like(vel.command)
-        fwd = (rng["lin_vel_x"][1] if Key.up in pressed else 0.0) + \
-              (rng["lin_vel_x"][0] if Key.down in pressed else 0.0)
-        turn = (rng["ang_vel_z"][1] if Key.left in pressed else 0.0) + \
-               (rng["ang_vel_z"][0] if Key.right in pressed else 0.0)
-        cmd[:, vel.get_command_idx("lin_vel_x")] = fwd
-        cmd[:, vel.get_command_idx("ang_vel_z")] = turn
-        return cmd
+    def __call__(self, _step):
+        from pynput.keyboard import Key
 
-    return controller
+        k = self.keys
+        pressed = lambda *keys: any(key in k for key in keys)
+
+        # Normalized commands, mapped into the environment's configured ranges.
+        values = {
+            "lin_vel_x": float(pressed("w", Key.up)) - float(pressed("s", Key.down)),
+            "lin_vel_y": float(pressed("e")) - float(pressed("q")),
+            "ang_vel_z": float(pressed("a", Key.left)) - float(pressed("d", Key.right)),
+        }
+
+        command = torch.zeros(
+            (1, len(self.names)), device=gs.device
+        )
+        for i, name in enumerate(self.names):
+            lo, hi = self.manager.range[name]
+            value = values.get(name, 0.0)
+            command[0, i] = value * (hi if value > 0 else abs(lo))
+
+        return command
+
+    def stop(self):
+        self.listener.stop()
+
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=pathlib.Path)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
+    parser.add_argument("--input", choices=("gamepad", "keyboard"), default="gamepad")
     args = parser.parse_args()
+
     if not args.checkpoint.is_file():
         parser.error(f"Checkpoint does not exist: {args.checkpoint}")
 
+    print("importing torch...", end=" ", flush=True)
+    start = time.perf_counter()
+    import torch
+    print(f"{time.perf_counter() - start:.2f}s")
+    print("importing genesis...", end=" ", flush=True)
+    start = time.perf_counter()
+    import genesis as gs
+    print(f"{time.perf_counter() - start:.2f}s")
+    from genesis_forge.wrappers import RslRlWrapper
+    from rsl_rl.runners import OnPolicyRunner
+    from puck.env import PuckStandEnv
+    from puck.train import training_config
+
     if args.device == "cpu":
         torch.set_default_device("cpu")
-    gs.init(backend=gs.cpu if args.device == "cpu" else gs.gpu, logging_level="warning")
+        backend = gs.cpu
+    else:
+        backend = gs.gpu
+
+    gs.init(backend=backend, logging_level="warning")
 
     base_env = PuckStandEnv(headless=False)
     env = RslRlWrapper(base_env)
-    env.build()
+    controller = None
 
-    base_env.velocity_command.use_external_controller(
-        make_controller(base_env.velocity_command)
-    )
-
-    obs, _ = env.reset()
-    runner = OnPolicyRunner(env, training_config(), str(args.checkpoint.parent), device=gs.device)
-    runner.load(str(args.checkpoint))
-    policy = runner.get_inference_policy(device=gs.device)
-
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
-    print("Arrow keys to drive. Ctrl+C to quit.")
     try:
+        env.build()
+
+        # Interactive velocity commands
+        if args.input == "gamepad":
+            from genesis_forge.gamepads import Gamepad
+
+            print("Connecting gamepad...")
+            controller = Gamepad()
+            base_env.velocity_command.use_gamepad(
+                controller,
+                lin_vel_x_axis=1,
+                lin_vel_y_axis=0,
+                ang_vel_z_axis=2,
+            )
+        else:
+            print("Keyboard controls: WASD / arrows; Q/E for sideways motion")
+            controller = KeyboardController(base_env.velocity_command)
+            base_env.velocity_command.use_external_controller(controller)
+
+        # Load trained policy
+        print(f"Loading {args.checkpoint}...")
+        runner = OnPolicyRunner(
+            env,
+            training_config(),
+            str(args.checkpoint.parent),
+            device=gs.device,
+        )
+        runner.load(str(args.checkpoint))
+        policy = runner.get_inference_policy(device=gs.device)
+
+        obs, _ = env.reset()
+        print("Puck is live! Ctrl-C to quit.")
+
         with torch.inference_mode():
             while True:
                 actions = policy(obs)
-                obs, _, _, _ = env.step(actions)
+                obs, _rews, _dones, _infos = env.step(actions)
+
     except KeyboardInterrupt:
         pass
+    except gs.GenesisException as e:
+        if str(e) != "Viewer closed.":
+            raise
     finally:
-        listener.stop()
+        if controller is not None:
+            controller.stop()
         env.close()
+
 
 if __name__ == "__main__":
     main()
