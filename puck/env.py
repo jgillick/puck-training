@@ -394,6 +394,20 @@ class PuckStandEnv(ManagedEnvironment):
         HEIGHT_COMMAND_MID = (HEIGHT_COMMAND_MINMAX[1] + HEIGHT_COMMAND_MINMAX[0]) / 2
         HEIGHT_RANGE_SCALE = (HEIGHT_COMMAND_MINMAX[1] - HEIGHT_COMMAND_MINMAX[0]) / 2
 
+        torque_scales: torch.Tensor | None = None
+        def joint_torque_observation(env):
+            nonlocal torque_scales
+            if torque_scales is None:
+                force_lower, force_upper = self.robot.get_dofs_force_range(
+                    self.actuator_manager.dofs_idx
+                )
+                torque_scales = 1.0 / torch.maximum(
+                    force_lower.abs(), force_upper.abs()
+                ).clamp_min(1e-6)
+                print(f"Torque scales: {torque_scales} for dofs {self.actuator_manager.dofs_names}")
+
+            return self.actuator_manager.get_dofs_force() * torque_scales
+
         self.observation_manager = ObservationManager(
             self,
             cfg={
@@ -405,7 +419,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "joint_position": {"fn": lambda env: self.action_manager.get_dofs_position(), "scale": 1/math.pi, "clip": (-1, 1)},
                 "joint_velocity": {"fn": lambda env: self.action_manager.get_dofs_velocity(), "scale": 0.01, "clip": (-1, 1)},
                 "wheel_velocity": {"fn": lambda env: self.wheel_action_manager.get_dofs_velocity(), "scale": 0.03, "clip": (-1, 1)},
-                # TODO: all motor drive torques!?
+                "joint_torque":   {"fn": joint_torque_observation, "clip": (-1.0, 1.0) },
                 "height_command": {
                     "fn": lambda env: (self.height_command.command - HEIGHT_COMMAND_MID) / HEIGHT_RANGE_SCALE,
                     "clip": (-1.0, 1.0),
