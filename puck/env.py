@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import genesis as gs
 from genesis_forge import ManagedEnvironment
+from genesis.utils import geom as gs_util_geom
 from genesis_forge.managers import (
     ActuatorManager,
     BaseActionManager,
@@ -24,7 +25,7 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
 CONTROL_DT = 1 / 50
 INITIAL_ROOT_POSITION = (0.0, 0.0, 0.23) #(x,y,z) height (m) offset caused by STANDING_JOINT_POSITIONS
-IDENTITY_QUATERNION = (math.pi/2, 0.0, 0.0, math.pi/2) # rotated 180 degrees
+IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
 INITIAL_LIMB_KP = 5.0
 INITIAL_LIMB_KD = 1.0
 LIMB_JOINT_NAMES = (
@@ -54,9 +55,12 @@ CURRICULUM_COOLDOWN_STEPS = 1200
 BASELINE_TRACKING_THRESHOLD = 0.6
 COMMAND_TRACKING_THRESHOLD = 0.5
 DIRECTIONAL_VELOCITY_STAGE = 2
+ROUGH_TERRAIN_STAGE = 7
 INITIAL_FORWARD_VELOCITY = 0.3
-MAX_FORWARD_VELOCITY = 2.0
-FORWARD_VELOCITY_INCREMENT = 0.1
+MAX_FORWARD_VELOCITY = 2.0 #m/s
+MAX_SIDE_VELOCITY = 1.0 #m/s
+MAX_YAW_VELOCITY = 5.0 #rad/s
+TRAINING_VELOCITY_INCREMENTS = 0.1
 VARIABLE_HEIGHT_STAGE = 4
 SIDE_VELOCITY_STAGE = 5
 VARIABLE_ATTITUDE_STAGE = 6
@@ -64,7 +68,7 @@ UNCONSTRAINED_LEGS_STAGE = 7
 MAX_CURRICULUM_LEVEL = DIRECTIONAL_VELOCITY_STAGE + int(
     round(
         (MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY)
-        / FORWARD_VELOCITY_INCREMENT
+        / TRAINING_VELOCITY_INCREMENTS
     )
 )
 ATTITUDE_TARGET_LIMIT = 0.15
@@ -208,7 +212,10 @@ class PuckStandEnv(ManagedEnvironment):
             ).repeat(len(envs_idx), 1)
             entity.set_quat(quat, envs_idx=envs_idx, zero_velocity=True)
 
-        cmd_scale = torch.tensor([1/MAX_FORWARD_VELOCITY, 1/0.3, 1/0.3], device=gs.device)
+        cmd_scale = torch.tensor(
+            [1/MAX_SIDE_VELOCITY, 1/MAX_FORWARD_VELOCITY, 1/MAX_YAW_VELOCITY],
+            device=gs.device
+        )
 
         self.entity_manager = EntityManager(
             self,
@@ -241,11 +248,8 @@ class PuckStandEnv(ManagedEnvironment):
         self.velocity_command = VelocityCommandManager(
             self,
             range={
-                "lin_vel_x": (
-                    INITIAL_FORWARD_VELOCITY,
-                    INITIAL_FORWARD_VELOCITY,
-                ),
-                "lin_vel_y": (0.0, 0.0),
+                "lin_vel_x": (0.0, 0.0),
+                "lin_vel_y": (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY), #start training with initial small forward velocity
                 "ang_vel_z": (0.0, 0.0),
             },
         )
@@ -265,29 +269,31 @@ class PuckStandEnv(ManagedEnvironment):
             excess = torch.relu(max_flexor_angle - tolerance)
             return torch.exp(-4.0 * (excess / tolerance).square())
 
-        def yaw_rate_error(env) -> torch.Tensor:
-            commanded_yaw_rate = self.velocity_command.command[:, 2]
-            actual_yaw_rate = self.entity_manager.get_angular_velocity()[:, 2]
-            return (actual_yaw_rate - commanded_yaw_rate).square()
+        VELOCITY_TRACKING_SENSITIVITY = 0.1
 
-        def side_velocity_tracking(env) -> torch.Tensor:
+        def forward_velocity_tracking(env) -> torch.Tensor:
             target = self.velocity_command.command[:, 1]
             actual = self.entity_manager.get_linear_velocity()[:, 1]
-            return torch.exp(-((actual - target) / 0.1).square())
+            return torch.exp(
+                -((actual - target) / VELOCITY_TRACKING_SENSITIVITY).square()
+            )
+        def side_velocity_tracking(env) -> torch.Tensor:
+            target = self.velocity_command.command[:, 0]
+            actual = self.entity_manager.get_linear_velocity()[:, 0]
+            return torch.exp(-((actual - target) / VELOCITY_TRACKING_SENSITIVITY).square())
 
         def attitude_tracking(axis: str):
             axis_index = {"roll": 0, "pitch": 1}[axis]
 
             def reward(env) -> torch.Tensor:
-                body_rpy = gs.utils.geom.quat_to_xyz(
+                body_rpy = gs_util_geom.quat_to_xyz(
                     self.entity_manager.base_quat, rpy=True
                 )
                 target = self.attitude_command.get_command(axis)
                 error = body_rpy[:, axis_index] - target
+                assert isinstance(error, torch.Tensor)
                 error = torch.atan2(torch.sin(error), torch.cos(error))
-                return torch.exp(
-                    -(error / ATTITUDE_TRACKING_SCALE).square()
-                )
+                return torch.exp(-(error / ATTITUDE_TRACKING_SCALE).square())
 
             return reward
 
@@ -316,14 +322,6 @@ class PuckStandEnv(ManagedEnvironment):
         self.reward_manager = RewardManager(
             self,
             cfg={
-                "forward_velocity": {
-                    "weight": 2.0,
-                    "fn": rewards.command_tracking_lin_vel(
-                        vel_cmd_manager=self.velocity_command,
-                        entity_manager=self.entity_manager,
-                        sensitivity=0.1,
-                    ),
-                },
                 "upright": {
                     "weight": -5.0,
                     "fn": rewards.flat_orientation_l2(
@@ -337,6 +335,10 @@ class PuckStandEnv(ManagedEnvironment):
                         entity_manager=self.entity_manager,
                     ),
                 },
+                "forward_velocity": {
+                    "weight": 1.0,
+                    "fn": forward_velocity_tracking,
+                },
                 "side_velocity": {
                     "weight": 0.5,
                     "fn": side_velocity_tracking,
@@ -348,10 +350,6 @@ class PuckStandEnv(ManagedEnvironment):
                 "roll_tracking": {
                     "weight": 1.0,
                     "fn": attitude_tracking("roll"),
-                },
-                "yaw_rate_error": {
-                    "weight": -0.5,
-                    "fn": yaw_rate_error,
                 },
                 "leg_symmetry": {
                     "weight": 1.0,
@@ -453,7 +451,6 @@ class PuckStandEnv(ManagedEnvironment):
                 },
                 "velocity_command": {
                     "fn": lambda env: self.velocity_command.observation(env) * cmd_scale,
-                    "scale": 10.0,
                     "clip": (-1.0, 1.0),
                 },
                 "actions": {
@@ -468,25 +465,28 @@ class PuckStandEnv(ManagedEnvironment):
 
     @property
     def curriculum_terrain(self) -> str:
-        return "random_uniform_terrain" if self.curriculum_level >= 3 else "flat_terrain"
+        return "random_uniform_terrain" if self.curriculum_level >= ROUGH_TERRAIN_STAGE else "flat_terrain"
 
     def _apply_curriculum_stage(self) -> None:
         directional = self.curriculum_level >= DIRECTIONAL_VELOCITY_STAGE
         sideways = self.curriculum_level >= SIDE_VELOCITY_STAGE
         forward_velocity_limit = min(
-            INITIAL_FORWARD_VELOCITY
-            + max(0, self.curriculum_level - DIRECTIONAL_VELOCITY_STAGE)
-            * FORWARD_VELOCITY_INCREMENT,
             MAX_FORWARD_VELOCITY,
+            INITIAL_FORWARD_VELOCITY + max(0, self.curriculum_level - DIRECTIONAL_VELOCITY_STAGE) * TRAINING_VELOCITY_INCREMENTS
+        )
+        # also scale up side velocity and yaw rate by TRAINING_VELOCITY_INCREMENTS
+        side_velocity_limit = min(
+            MAX_SIDE_VELOCITY,
+            max(0, self.curriculum_level - SIDE_VELOCITY_STAGE + 1) * TRAINING_VELOCITY_INCREMENTS
+        )
+        yaw_velocity_limit = min(
+            MAX_YAW_VELOCITY,
+            max(0, self.curriculum_level - DIRECTIONAL_VELOCITY_STAGE + 1) * TRAINING_VELOCITY_INCREMENTS
         )
         self.velocity_command.range = {
-            "lin_vel_x": (
-                (-forward_velocity_limit, forward_velocity_limit)
-                if directional
-                else (INITIAL_FORWARD_VELOCITY, INITIAL_FORWARD_VELOCITY)
-            ),
-            "lin_vel_y": (-0.1, 0.1) if sideways else (0.0, 0.0),
-            "ang_vel_z": (-0.1, 0.1) if directional else (0.0, 0.0),
+            "lin_vel_x": (-side_velocity_limit, side_velocity_limit) if sideways else (0.0, 0.0),
+            "lin_vel_y": (-forward_velocity_limit, forward_velocity_limit) if directional else (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY),
+            "ang_vel_z": (-yaw_velocity_limit, yaw_velocity_limit) if directional else (0.0, 0.0),
         }
         self.velocity_command.resample_time_sec = 4.0 if directional else 5.0
         self.velocity_command.resample_command(self.all_envs_idx)
@@ -577,7 +577,7 @@ class PuckStandEnv(ManagedEnvironment):
             episode_length_avg,
         ) = averages
         enough_survival = episode_length_avg >= (
-            self.max_episode_length_steps * CURRICULUM_MIN_EPISODE_LENGTH_RATIO
+            CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0)
         )
         tracking_threshold = (
             BASELINE_TRACKING_THRESHOLD
@@ -616,7 +616,7 @@ class PuckStandEnv(ManagedEnvironment):
         episode = extras.setdefault("episode", {})
         episode["Curriculum / level"] = self.curriculum_level
         episode["Curriculum / max_forward_velocity"] = self.velocity_command.range[
-            "lin_vel_x"
+            "lin_vel_y"
         ][1]
         episode["Curriculum / observation_noise"] = int(self.curriculum_level >= 1)
         episode["Curriculum / rough_terrain"] = int(self.curriculum_level >= 3)
