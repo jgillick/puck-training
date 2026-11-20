@@ -9,8 +9,7 @@ ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
 CONTROL_DT = 1 / 50
 INITIAL_ROOT_POSITION = (0.0, 0.0, 0.23) #(x,y,z) height (m) offset caused by STANDING_JOINT_POSITIONS
 IDENTITY_QUATERNION = (1.0, 0.0, 0.0, 0.0)
-INITIAL_LIMB_KP = 5.0
-INITIAL_LIMB_KD = 1.0
+LIMB_KP, LIMB_KD = 15.0, 1.0
 WHEEL_JOINT_NAMES = ("wheel_r", "wheel_l")
 STANDING_JOINT_POSITIONS = {
     "flexor_r": 0.0,
@@ -30,9 +29,9 @@ INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 1.0 #m/s
 MAX_YAW_VELOCITY = 5.0 #rad/s
+MAX_VEL_ACCEL = ( 1.5, 1.5, 3.0 )  # m/s^2, m/s^2, rad/s^2
 TRAINING_VELOCITY_INCREMENTS = 0.2
 VELOCITY_TRACKING_SENSITIVITY = 0.2 #m/s
-HEIGHT_TRACKING_SENSITIVITY = 0.1 #m
 YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
 # Staging:
 class Stage(enum.IntEnum):
@@ -209,13 +208,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "pose": { "fn": reset_pose } #type: ignore
             },
         )
-        self.actuator_manager = gf_mgrs.ActuatorManager(
-            self,
-            joint_names=".*",
-            default_pos=STANDING_JOINT_POSITIONS,
-            kp=INITIAL_LIMB_KP,
-            kv=INITIAL_LIMB_KD,
-        )
+        self.actuator_manager = gf_mgrs.ActuatorManager(self, joint_names=".*", default_pos=STANDING_JOINT_POSITIONS, kp=LIMB_KP, kv=1.0, damping=LIMB_KD)
         self.action_manager = gf_mgrs.PositionActionManager(
             self,
             actuator_manager=self.actuator_manager,
@@ -236,6 +229,9 @@ class PuckStandEnv(ManagedEnvironment):
                 "ang_vel_z": (0.0, 0.0),
             },
         )
+        self.cmd_smooth = self.velocity_command.command
+        self._cmd_slew_max = torch.tensor(MAX_VEL_ACCEL, device=gs.device, dtype=gs.tc_float)
+
         self.height_command = gf_mgrs.CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
         self.attitude_command = gf_mgrs.CommandManager(
             self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
@@ -252,22 +248,22 @@ class PuckStandEnv(ManagedEnvironment):
                 for name in ("flexor_r", "flexor_l")
             ]
             max_flexor_angle = joint_positions[:, flexor_indices].abs().amax(dim=1)
-            tolerance = math.pi / 30
+            tolerance = math.pi / 15 #12deg
             excess = torch.relu(max_flexor_angle - tolerance)
             return torch.exp(-4.0 * (excess / tolerance).square())
 
         def forward_velocity_tracking(env) -> torch.Tensor:
-            target = self.velocity_command.command[:, 1]
+            target = self.cmd_smooth[:, 1]
             actual = self.entity_manager.get_linear_velocity()[:, 1]
             return square_linear_error(-(actual - target), VELOCITY_TRACKING_SENSITIVITY)
 
         def side_velocity_tracking(env) -> torch.Tensor:
-            target = self.velocity_command.command[:, 0]
+            target = self.cmd_smooth[:, 0]
             actual = self.entity_manager.get_linear_velocity()[:, 0]
             return square_linear_error(actual - target, VELOCITY_TRACKING_SENSITIVITY)
 
         def yaw_velocity_tracking(env) -> torch.Tensor:
-            target = self.velocity_command.command[:, 2]
+            target = self.cmd_smooth[:, 2]
             actual = self.entity_manager.get_angular_velocity()[:, 2]
             return square_linear_error(actual - target, YAW_TRACKING_SENSITIVITY)
 
@@ -289,7 +285,7 @@ class PuckStandEnv(ManagedEnvironment):
         def height_tracking(env) -> torch.Tensor:
             target = self.height_command.command.reshape(-1)
             actual = self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1])
-            return square_linear_error(-(actual - target), HEIGHT_TRACKING_SENSITIVITY)
+            return torch.exp(-(actual - target).abs() / 0.05) # Laplace: slope doesn't vanish near 0
 
         def hip_knee_symmetry_reward(env) -> torch.Tensor:
             '''Reward symmetrical hip & knee (values are inverted between l / r)'''
@@ -368,6 +364,10 @@ class PuckStandEnv(ManagedEnvironment):
 
             return self.actuator_manager.get_dofs_force() * torque_scales
 
+        def velocity_command_observation(env):
+            # return the smoothed velocity command
+            return self.cmd_smooth * cmd_scale
+
         self.observation_manager = gf_mgrs.ObservationManager(
             self,
             cfg={
@@ -387,7 +387,7 @@ class PuckStandEnv(ManagedEnvironment):
                     "clip": (-1.0, 1.0),
                     "units": "normalized",
                 },
-                "velocity_command": { "fn": lambda env: self.velocity_command.observation(env) * cmd_scale, "clip": (-1.0, 1.0) },
+                "velocity_command": { "fn": velocity_command_observation, "clip": (-1.0, 1.0) },
                 "actions": { "fn": gf_mdp.observations.current_actions(), "clip": (-1.0, 1.0) },
             },
             history_len=5,
@@ -444,7 +444,7 @@ class PuckStandEnv(ManagedEnvironment):
         if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.0:
             self.log("relaxed legs enabled")
             sym.weight = 0.0
-            self.reward_manager["hip_flexor_alignment"].weight  = 0.0
+            # self.reward_manager["hip_flexor_alignment"].weight  = 0.0
 
     def _add_observation_noise(
         self, value: torch.Tensor, standard_deviation: float
@@ -492,6 +492,10 @@ class PuckStandEnv(ManagedEnvironment):
         self.curriculum_samples.clear()
 
     def step(self, actions: torch.Tensor):
+        if self.cmd_smooth is not None:
+            raw = self.velocity_command.command # (N, 3) target
+            delta = (raw - self.cmd_smooth).clamp(-self._cmd_slew_max, self._cmd_slew_max)
+            self.cmd_smooth += delta
         observations_batch, reward, terminated, truncated, extras = super().step(actions)
         episode = extras.setdefault("episode", {})
         episode["Curriculum/level"] = self.curriculum_level
