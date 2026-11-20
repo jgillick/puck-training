@@ -41,10 +41,10 @@ class Stage(enum.IntEnum):
     FWD_CMD = 2
     FWDBACK_CMD = 3
     YAW_COMMAND = 4
-    VARIABLE_HEIGHT = 7
-    VARIABLE_ATTITUDE = 10
-    ROUGH_TERRAIN = 12
-    SIDE_VELOCITY = 16
+    VARIABLE_HEIGHT = 6
+    VARIABLE_ATTITUDE = 8
+    ROUGH_TERRAIN = 10
+    SIDE_VELOCITY = 12
     Max = SIDE_VELOCITY
 
 MAX_CURRICULUM_LEVEL = Stage.Max + 4
@@ -111,7 +111,7 @@ class PuckStandEnv(ManagedEnvironment):
             num_envs=num_envs,
             dt=CONTROL_DT,
             max_episode_length_sec=max_episode_length_sec,
-            # max_episode_random_scaling=0.3,
+            # max_episode_random_scaling=0.3, #TODO, but throws error when enabled
         )
         self.curriculum_level = Stage.INITIAL.value
         self.curriculum_samples: list[CurriculumMetrics] = []
@@ -564,10 +564,12 @@ class PuckStandEnv(ManagedEnvironment):
         return value.unsqueeze(0) if value.ndim == 1 else value
 
     def stagename(self) -> str:
-        try:
-            return Stage(min(self.curriculum_level, Stage.Max)).name + f"({self.curriculum_level})"
-        except ValueError:
+        level = min(self.curriculum_level, Stage.Max)
+        stage = max((stage for stage in Stage if stage.value <= level), default=None, key=lambda stage: stage.value)
+        if stage is None:
             return f"Stage({self.curriculum_level})"
+        offset = level - stage.value
+        return f"{stage.name}+{offset}" if offset else f"{stage.name}({self.curriculum_level})"
     def logbase(self, * args, **kwargs) -> None:
         if self.periodic_outfile:
             with open(self.periodic_outfile, 'a') as f:
