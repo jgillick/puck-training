@@ -58,13 +58,13 @@ class Stage(enum.IntEnum):
     FWD_CMD = 2
     FWDBACK_CMD = 3
     YAW_COMMAND = 4
-    SIDE_VELOCITY = 7
-    VARIABLE_HEIGHT = 10
-    VARIABLE_ATTITUDE = 12
-    ROUGH_TERRAIN = 16
-    Max = 17
+    VARIABLE_HEIGHT = 7
+    VARIABLE_ATTITUDE = 10
+    ROUGH_TERRAIN = 12
+    SIDE_VELOCITY = 16
+    Max = SIDE_VELOCITY
 
-MAX_CURRICULUM_LEVEL = Stage.Max + math.ceil((MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY) / TRAINING_VELOCITY_INCREMENTS)
+MAX_CURRICULUM_LEVEL = Stage.Max + 4
 ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
@@ -367,8 +367,8 @@ class PuckStandEnv(ManagedEnvironment):
                 "hip_flexor_alignment": { "weight": 1.5, "fn": hip_flexor_alignment },
                 "height_tracking":      { "weight": 3.0, "fn": height_tracking },
                 # penalize high-frequency actions to encourage smooth control
-                "`action_rate_limbs`":    {"weight": -0.02, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
-                "action_rate_wheels":   {"weight": -0.05,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
+                "`action_rate_limbs`":    {"weight": -0.01, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
+                "action_rate_wheels":   {"weight": -0.02,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
             },
         )
         TerminationManager(

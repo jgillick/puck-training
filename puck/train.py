@@ -51,6 +51,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--resume", type=pathlib.Path, help="Resume from an existing model")
+    parser.add_argument("--curriculum", default=0, type=int, help="Curriculum level to start training")
     parser.add_argument("log_dir", type=pathlib.Path, nargs="?", default=None)
     parser.add_argument("--video-every", type=int, default=25, help="Record a video every N iterations")
     parser.add_argument("--video-len", type=float, default=10.0, help="Video length in seconds")
@@ -90,6 +91,9 @@ def main() -> None:
     puckenv = PuckStandEnv(num_envs=args.num_envs, headless=True)
     puckenv.periodic_outfile = args.log_dir / "log.txt"
     puckenv.log(f"Training with {args.num_envs} environments and {args.iterations} iterations on device {args.device}")
+    puckenv.curriculum_level = args.curriculum
+    if puckenv.curriculum_level > 0:
+        puckenv.log(f"Starting training at curriculum level {args.curriculum}")
     video_env = VideoWrapper(
         puckenv,
         camera_attr="camera",
