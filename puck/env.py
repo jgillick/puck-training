@@ -29,7 +29,7 @@ INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 1.0 #m/s
 MAX_YAW_VELOCITY = 5.0 #rad/s
-MAX_VEL_ACCEL = ( 1.5, 1.5, 3.0 )  # m/s^2, m/s^2, rad/s^2
+MAX_VEL_ACCEL = ( 1.5, 1.5, 0.5 )  # m/s^2, m/s^2, rad/s^2
 TRAINING_VELOCITY_INCREMENTS = 0.2
 VELOCITY_TRACKING_SENSITIVITY = 0.2 #m/s
 YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
@@ -229,7 +229,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "ang_vel_z": (0.0, 0.0),
             },
         )
-        self.cmd_smooth = self.velocity_command.command
+        self.cmd_smooth = self.velocity_command.command.clone()
         self._cmd_slew_max = torch.tensor(MAX_VEL_ACCEL, device=gs.device, dtype=gs.tc_float)
 
         self.height_command = gf_mgrs.CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
@@ -494,7 +494,7 @@ class PuckStandEnv(ManagedEnvironment):
     def step(self, actions: torch.Tensor):
         if self.cmd_smooth is not None:
             raw = self.velocity_command.command # (N, 3) target
-            delta = (raw - self.cmd_smooth).clamp(-self._cmd_slew_max, self._cmd_slew_max)
+            delta = (raw - self.cmd_smooth).clamp(-self._cmd_slew_max * self.dt, self._cmd_slew_max * self.dt)
             self.cmd_smooth += delta
         observations_batch, reward, terminated, truncated, extras = super().step(actions)
         episode = extras.setdefault("episode", {})
@@ -558,6 +558,7 @@ class PuckStandEnv(ManagedEnvironment):
         self.robot.set_dofs_position(default_positions, dofs_idx_local=self.actuator_manager.dofs_idx, envs_idx=reset_ids)
         self.robot.zero_all_dofs_velocity(reset_ids)
         self.entity_manager.step()
+        self.cmd_smooth[reset_ids] = self.velocity_command.command[reset_ids]
 
         if env_ids is not None and len(reset_ids) > 0: self._update_curriculum()
         if env_ids is None: observations_batch = self.get_observations()
