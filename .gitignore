@@ -3,5 +3,5 @@
 /.venv/
 /uv.lock
 __pycache__/
-/runs/
+/runs*/
 /reference/
