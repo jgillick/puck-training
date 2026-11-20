@@ -1,25 +1,8 @@
-"""Genesis Forge environment for teaching Puck to stand and balance."""
-
-import math, pathlib, enum, dataclasses, typing
-from collections.abc import Sequence
-import numpy as np
-import torch
+import math, pathlib, enum, dataclasses, torch, collections.abc, numpy
 import genesis as gs
 from genesis_forge import ManagedEnvironment
 from genesis.utils import geom as gs_util_geom
-from genesis_forge.managers import (
-    ActuatorManager,
-    BaseActionManager,
-    CommandManager,
-    EntityManager,
-    ObservationManager,
-    PositionActionManager,
-    RewardManager,
-    TerrainManager,
-    TerminationManager,
-    VelocityCommandManager,
-)
-from genesis_forge.mdp import observations, rewards, terminations
+import genesis_forge.managers as gf_mgrs, genesis_forge.mdp as gf_mdp
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROBOT_MODEL_PATH = PROJECT_ROOT / "robot.xml"
@@ -103,15 +86,11 @@ def ground_contact_failure(env) -> torch.Tensor:
     return non_wheel_contacts.any(dim=1)
 
 
-class PuckWheelTorqueActionManager(BaseActionManager):
+class PuckWheelTorqueActionManager(gf_mgrs.BaseActionManager):
     """Map two normalized actions to bounded wheel torques."""
-
     def build(self) -> None:
         super().build()
-        self._force_lower, self._force_upper = self.env.robot.get_dofs_force_range(
-            self.dofs_idx
-        )
-
+        self._force_lower, self._force_upper = self.env.robot.get_dofs_force_range(self.dofs_idx)
     def process_actions(self, actions: torch.Tensor) -> torch.Tensor:
         actions = actions.clamp(-1.0, 1.0)
         return torch.where(
@@ -119,24 +98,15 @@ class PuckWheelTorqueActionManager(BaseActionManager):
             actions * self._force_upper,
             actions * -self._force_lower,
         )
-
     def send_actions_to_simulation(self, actions: torch.Tensor) -> torch.Tensor:
-        self.env.robot.control_dofs_force(
-            actions,
-            self.dofs_idx,
-        )
+        self.env.robot.control_dofs_force(actions, self.dofs_idx)
         return actions
 
 
 class PuckStandEnv(ManagedEnvironment):
     """Train Puck to stand and balance with position-controlled limbs."""
 
-    def __init__(
-        self,
-        num_envs: int = 1,
-        headless: bool = True,
-        max_episode_length_sec: int = 10,
-    ) -> None:
+    def __init__(self, num_envs: int, headless: bool = True, max_episode_length_sec: int = 10) -> None:
         super().__init__(
             num_envs=num_envs,
             dt=CONTROL_DT,
@@ -157,8 +127,8 @@ class PuckStandEnv(ManagedEnvironment):
                 enable_joint_limit=True,
             ),
         )
-        terrain_pixels = (np.indices((192, 384)) // 8).sum(axis=0) % 2
-        terrain_texture = np.empty((192, 384, 3), dtype=np.uint8)
+        terrain_pixels = (numpy.indices((192, 384)) // 8).sum(axis=0) % 2
+        terrain_texture = numpy.empty((192, 384, 3), dtype=numpy.uint8)
         terrain_texture[terrain_pixels == 0] = (62, 74, 80)
         terrain_texture[terrain_pixels == 1] = (84, 96, 100)
         self.terrain = self.scene.add_entity(
@@ -182,11 +152,7 @@ class PuckStandEnv(ManagedEnvironment):
             ),
         )
         self.robot = self.scene.add_entity(
-            gs.morphs.MJCF(
-                file=str(ROBOT_MODEL_PATH),
-                pos=INITIAL_ROOT_POSITION,
-                quat=IDENTITY_QUATERNION,
-            )
+            gs.morphs.MJCF(file=str(ROBOT_MODEL_PATH), pos=INITIAL_ROOT_POSITION, quat=IDENTITY_QUATERNION)
         )
         robot_entity = getattr(self.robot, "entity", self.robot)
         body_link = robot_entity.get_link("body")
@@ -216,7 +182,7 @@ class PuckStandEnv(ManagedEnvironment):
 
     def config(self) -> None:
         """Configure standing-pose actions, commands, rewards, and observations."""
-        self.terrain_manager = TerrainManager(self, terrain=self.terrain)
+        self.terrain_manager = gf_mgrs.TerrainManager(self, terrain=self.terrain)
 
         def reset_pose(env, entity, envs_idx) -> None:
             pos = self.terrain_manager.generate_random_env_pos(
@@ -236,23 +202,21 @@ class PuckStandEnv(ManagedEnvironment):
             device=gs.device
         )
 
-        self.entity_manager = EntityManager(
+        self.entity_manager = gf_mgrs.EntityManager(
             self,
             entity=self.robot,
             on_reset={
-                "pose": {
-                    "fn": reset_pose
-                }
+                "pose": { "fn": reset_pose } #type: ignore
             },
         )
-        self.actuator_manager = ActuatorManager(
+        self.actuator_manager = gf_mgrs.ActuatorManager(
             self,
             joint_names=".*",
             default_pos=STANDING_JOINT_POSITIONS,
             kp=INITIAL_LIMB_KP,
             kv=INITIAL_LIMB_KD,
         )
-        self.action_manager = PositionActionManager(
+        self.action_manager = gf_mgrs.PositionActionManager(
             self,
             actuator_manager=self.actuator_manager,
             actuator_joints=list(STANDING_JOINT_POSITIONS.keys()),
@@ -264,7 +228,7 @@ class PuckStandEnv(ManagedEnvironment):
             actuator_manager=self.actuator_manager,
             actuator_joints=list(WHEEL_JOINT_NAMES),
         )
-        self.velocity_command = VelocityCommandManager(
+        self.velocity_command = gf_mgrs.VelocityCommandManager(
             self,
             range={
                 "lin_vel_x": (0.0, 0.0),
@@ -272,8 +236,8 @@ class PuckStandEnv(ManagedEnvironment):
                 "ang_vel_z": (0.0, 0.0),
             },
         )
-        self.height_command = CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
-        self.attitude_command = CommandManager(
+        self.height_command = gf_mgrs.CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
+        self.attitude_command = gf_mgrs.CommandManager(
             self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
         )
 
@@ -339,22 +303,18 @@ class PuckStandEnv(ManagedEnvironment):
                 ("knee_l", "knee_r", -1.0),
             )
             errors = torch.stack(
-                [
-                    positions[:, dof_indices[left]]
-                    - sign * positions[:, dof_indices[right]]
-                    for left, right, sign in mirrored_joints
-                ],
+                [ positions[:, dof_indices[left]] - sign * positions[:, dof_indices[right]] for left, right, sign in mirrored_joints ],
                 dim=1,
             )
             return torch.exp(-errors.square().mean(dim=1))
 
 
-        self.reward_manager = RewardManager(
+        self.reward_manager = gf_mgrs.RewardManager(
             self,
             cfg={
                 "upright": {
                     "weight": -5.0,
-                    "fn": rewards.flat_orientation_l2(
+                    "fn": gf_mdp.rewards.flat_orientation_l2(
                         entity_manager=self.entity_manager
                     ),
                 },
@@ -367,17 +327,17 @@ class PuckStandEnv(ManagedEnvironment):
                 "hip_flexor_alignment": { "weight": 1.5, "fn": hip_flexor_alignment },
                 "height_tracking":      { "weight": 3.0, "fn": height_tracking },
                 # penalize high-frequency actions to encourage smooth control
-                "`action_rate_limbs`":    {"weight": -0.01, "fn": rewards.action_rate_l2(action_manager=self.action_manager)},
-                "action_rate_wheels":   {"weight": -0.02,  "fn": rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
+                "action_rate_limbs":    {"weight": -0.01, "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.action_manager)},
+                "action_rate_wheels":   {"weight": -0.02,  "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
             },
         )
-        TerminationManager(
+        gf_mgrs.TerminationManager(
             self,
             term_cfg={
-                "timeout": {"fn": terminations.timeout(), "time_out": True},
                 "ground_contact": {"fn": ground_contact_failure},
+                "timeout": {"fn": gf_mdp.terminations.timeout(), "time_out": True},
                 "bad_orientation": {
-                    "fn": terminations.bad_orientation(
+                    "fn": gf_mdp.terminations.bad_orientation(
                         limit_angle=75,
                         entity_manager=self.entity_manager,
                     )
@@ -408,14 +368,10 @@ class PuckStandEnv(ManagedEnvironment):
 
             return self.actuator_manager.get_dofs_force() * torque_scales
 
-        self.observation_manager = ObservationManager(
+        self.observation_manager = gf_mgrs.ObservationManager(
             self,
             cfg={
-                "imu": {
-                    "fn": imu_observation,
-                    "clip": (-2.0, 2.0),
-                },
-                # use action_manager for joint only observations, not wheel joints. then add wheel velocity obs separately
+                "imu": { "fn": imu_observation, "clip": (-2.0, 2.0) },
                 "joint_position": {"fn": lambda env: self.action_manager.get_dofs_position(), "scale": 1/math.pi, "clip": (-1, 1)},
                 "joint_velocity": {"fn": lambda env: self.action_manager.get_dofs_velocity(), "scale": 0.01, "clip": (-1, 1)},
                 "wheel_velocity": {"fn": lambda env: self.wheel_action_manager.get_dofs_velocity(), "scale": 0.03, "clip": (-1, 1)},
@@ -431,14 +387,8 @@ class PuckStandEnv(ManagedEnvironment):
                     "clip": (-1.0, 1.0),
                     "units": "normalized",
                 },
-                "velocity_command": {
-                    "fn": lambda env: self.velocity_command.observation(env) * cmd_scale,
-                    "clip": (-1.0, 1.0),
-                },
-                "actions": {
-                    "fn": observations.current_actions(),
-                    "clip": (-1.0, 1.0),
-                },
+                "velocity_command": { "fn": lambda env: self.velocity_command.observation(env) * cmd_scale, "clip": (-1.0, 1.0) },
+                "actions": { "fn": gf_mdp.observations.current_actions(), "clip": (-1.0, 1.0) },
             },
             history_len=5,
             noise=0.0,
@@ -492,7 +442,7 @@ class PuckStandEnv(ManagedEnvironment):
         self.height_command.resample_time_sec = 2.0 if variable_height else None
         self.height_command.resample_command(self.all_envs_idx)
         if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.0:
-            self.log(f"relaxed legs enabled")
+            self.log("relaxed legs enabled")
             sym.weight = 0.0
             self.reward_manager["hip_flexor_alignment"].weight  = 0.0
 
@@ -580,7 +530,7 @@ class PuckStandEnv(ManagedEnvironment):
                 f"{self.actuator_manager.dofs_names}"
             )
 
-    def reset(self, env_ids: torch.Tensor | Sequence[int] | None = None):
+    def reset(self, env_ids: torch.Tensor | collections.abc.Sequence[int] | None = None):
         if env_ids is not None:
             reset_ids_for_metrics = (
                 env_ids
@@ -593,32 +543,20 @@ class PuckStandEnv(ManagedEnvironment):
                 )
         observations_batch, info = super().reset(env_ids)
 
-        if env_ids is None:
-            reset_ids = self.all_envs_idx
-        elif isinstance(env_ids, torch.Tensor):
-            reset_ids = env_ids.to(device=gs.device, dtype=torch.long)
-        else:
-            reset_ids = torch.as_tensor(env_ids, device=gs.device, dtype=torch.long)
+        if env_ids is None: reset_ids = self.all_envs_idx
+        elif isinstance(env_ids, torch.Tensor): reset_ids = env_ids.to(device=gs.device, dtype=torch.long)
+        else: reset_ids = torch.as_tensor(env_ids, device=gs.device, dtype=torch.long)
 
         default_positions = self.actuator_manager.default_dofs_pos
         if default_positions.ndim == 1:
-            default_positions = default_positions.unsqueeze(0).expand(
-                len(reset_ids), -1
-            )
-        else:
-            default_positions = default_positions[reset_ids]
-        self.robot.set_dofs_position(
-            default_positions,
-            dofs_idx_local=self.actuator_manager.dofs_idx,
-            envs_idx=reset_ids,
-        )
+            default_positions = default_positions.unsqueeze(0).expand(len(reset_ids), -1)
+        else: default_positions = default_positions[reset_ids]
+        self.robot.set_dofs_position(default_positions, dofs_idx_local=self.actuator_manager.dofs_idx, envs_idx=reset_ids)
         self.robot.zero_all_dofs_velocity(reset_ids)
         self.entity_manager.step()
 
-        if env_ids is not None and len(reset_ids) > 0:
-            self._update_curriculum()
-        if env_ids is None:
-            observations_batch = self.get_observations()
+        if env_ids is not None and len(reset_ids) > 0: self._update_curriculum()
+        if env_ids is None: observations_batch = self.get_observations()
         return observations_batch, info
 
     @staticmethod
