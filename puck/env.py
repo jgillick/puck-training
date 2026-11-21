@@ -19,7 +19,7 @@ STANDING_JOINT_POSITIONS = {
     "knee_l": -math.pi / 2,
     "flexor_l": 0.0,
 }
-CURRICULUM_CHECK_EVERY_STEPS = 600
+CURRICULUM_CHECK_EVERY_STEPS = 400
 CURRICULUM_AVG_SAMPLES = 5
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 MIN_TRACKING_THRESHOLD = 0.8 #threshold for tracking performance to advance curriculum
@@ -30,7 +30,6 @@ MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 1.0 #m/s
 MAX_YAW_VELOCITY = 5.0 #rad/s
 MAX_VEL_ACCEL = ( 1.5, 1.5, 0.5 )  # m/s^2, m/s^2, rad/s^2
-TRAINING_VELOCITY_INCREMENTS = 0.2
 VELOCITY_TRACKING_SENSITIVITY = 0.2 #m/s
 YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
 # Staging:
@@ -40,13 +39,13 @@ class Stage(enum.IntEnum):
     FWD_CMD = 2
     FWDBACK_CMD = 3
     YAW_COMMAND = 4
-    VARIABLE_HEIGHT = 6
-    VARIABLE_ATTITUDE = 8
-    ROUGH_TERRAIN = 10
-    SIDE_VELOCITY = 12
+    VARIABLE_HEIGHT = 5
+    PITCH_CMD = 6
+    ROLL_CMD = 7
+    ROUGH_TERRAIN = 8
+    SIDE_VELOCITY = 9
     Max = SIDE_VELOCITY
 
-MAX_CURRICULUM_LEVEL = Stage.Max + 4
 ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
@@ -112,7 +111,8 @@ class PuckStandEnv(ManagedEnvironment):
             max_episode_length_sec=max_episode_length_sec,
             # max_episode_random_scaling=0.3, #TODO, but throws error when enabled
         )
-        self.curriculum_level = Stage.INITIAL.value
+        self.curriculum_level : float = Stage.INITIAL.value #remainder is sub-level
+        self.sub_level_step = 1.0 #default. each curriculum stage can change this, 0 or 1 disables
         self.curriculum_samples: list[CurriculumMetrics] = []
         self.next_curriculum_check_step = CURRICULUM_CHECK_EVERY_STEPS
         self._last_reset_mean_ep_length = 0.0
@@ -400,51 +400,64 @@ class PuckStandEnv(ManagedEnvironment):
         return "random_uniform_terrain" if self.curriculum_level >= Stage.ROUGH_TERRAIN else "flat_terrain"
 
     def _apply_curriculum_stage(self) -> None:
-        directional = self.curriculum_level >= Stage.FWD_CMD
-        yaw_enabled = self.curriculum_level >= Stage.YAW_COMMAND
-        sideways = self.curriculum_level >= Stage.SIDE_VELOCITY
+        # set each limit to the initial
+        lim_vel_fwd = INITIAL_FORWARD_VELOCITY
+        lim_vel_bck = 0
+        lim_vel_yaw = 0
+        lim_pitch = 0
+        lim_roll = 0
+        lim_height = (HEIGHT_MID, HEIGHT_MID)
+        lim_vel_side = 0
+        stage : int = math.floor(self.curriculum_level)
+        sub_level : float = round(self.curriculum_level - stage, 6)
 
-        forward_velocity_limit = min(MAX_FORWARD_VELOCITY, INITIAL_FORWARD_VELOCITY + max(0, self.curriculum_level - Stage.FWD_CMD) * TRAINING_VELOCITY_INCREMENTS)
-        reverse_velocity_limit = min(INITIAL_FORWARD_VELOCITY, max(0, self.curriculum_level - Stage.FWDBACK_CMD + 1) * TRAINING_VELOCITY_INCREMENTS)
-        side_velocity_limit = min(
-            MAX_SIDE_VELOCITY,
-            max(0, self.curriculum_level - Stage.SIDE_VELOCITY + 1) * TRAINING_VELOCITY_INCREMENTS
-        )
-        yaw_velocity_limit = min(
-            MAX_YAW_VELOCITY,
-            max(0, self.curriculum_level - Stage.YAW_COMMAND + 1) * TRAINING_VELOCITY_INCREMENTS
-        )
+        self.sub_level_step = 0.1 if stage >= Stage.FWD_CMD and stage < Stage.ROUGH_TERRAIN else 0.0
+
+        # for each stage- map self.sub_level to expand the range
+        if self.curriculum_level >= Stage.FWD_CMD:
+            # map lim_vel_fwd between INITIAL_FORWARD_VELOCITY and MAX_FORWARD_VELOCITY
+            lim_vel_fwd = INITIAL_FORWARD_VELOCITY + sub_level * (MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY) if (stage == Stage.FWD_CMD) else MAX_FORWARD_VELOCITY
+        if self.curriculum_level >= Stage.FWDBACK_CMD:
+            lim_vel_bck = sub_level * MAX_FORWARD_VELOCITY if (stage == Stage.FWDBACK_CMD) else MAX_FORWARD_VELOCITY
+        if self.curriculum_level >= Stage.YAW_COMMAND:
+            lim_vel_yaw = sub_level * MAX_YAW_VELOCITY if (stage == Stage.YAW_COMMAND) else MAX_YAW_VELOCITY
+        if self.curriculum_level >= Stage.SIDE_VELOCITY:
+            lim_vel_side = sub_level * MAX_SIDE_VELOCITY if (stage == Stage.SIDE_VELOCITY) else MAX_SIDE_VELOCITY
+        if self.curriculum_level >= Stage.PITCH_CMD:
+            lim_pitch = sub_level * ATTITUDE_TARGET_LIMIT if (stage == Stage.PITCH_CMD) else ATTITUDE_TARGET_LIMIT
+        if self.curriculum_level >= Stage.ROLL_CMD:
+            lim_roll = sub_level * ATTITUDE_TARGET_LIMIT if (stage == Stage.ROLL_CMD) else ATTITUDE_TARGET_LIMIT
+        if self.curriculum_level >= Stage.VARIABLE_HEIGHT:
+            if (stage == Stage.VARIABLE_HEIGHT):
+                lim_height = (
+                    HEIGHT_MID - sub_level * (HEIGHT_MID - HEIGHT_COMMAND_MINMAX[0]),
+                    HEIGHT_MID + sub_level * (HEIGHT_COMMAND_MINMAX[1] - HEIGHT_MID)
+                )
+            else: lim_height = HEIGHT_COMMAND_MINMAX
+        # TODO, see if terrain can be modified this way in runtime
+
+        # apply limits
         self.velocity_command.range = {
-            "lin_vel_x": (-side_velocity_limit, side_velocity_limit) if sideways else (0.0, 0.0),
-            "lin_vel_y": (-forward_velocity_limit, reverse_velocity_limit) if directional else (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY),
-            "ang_vel_z": (-yaw_velocity_limit, yaw_velocity_limit) if yaw_enabled else (0.0, 0.0),
+            "lin_vel_x": (-lim_vel_side, lim_vel_side),
+            "lin_vel_y": (-lim_vel_fwd, lim_vel_bck),
+            "ang_vel_z": (-lim_vel_yaw, lim_vel_yaw),
         }
         self.velocity_command.resample_time_sec = 2.0
         self.velocity_command.resample_command(self.all_envs_idx)
-
-        variable_attitude = self.curriculum_level >= Stage.VARIABLE_ATTITUDE
-        attitude_range = (
-            (-ATTITUDE_TARGET_LIMIT, ATTITUDE_TARGET_LIMIT)
-            if variable_attitude
-            else (0.0, 0.0)
-        )
         self.attitude_command.range = {
-            "pitch": attitude_range,
-            "roll": attitude_range,
+            "pitch": (-lim_pitch, lim_pitch),
+            "roll": (-lim_roll, lim_roll),
         }
-        self.attitude_command.resample_time_sec = (
-            2.0 if variable_attitude else None
-        )
+        self.attitude_command.resample_time_sec = ( 2.0 if stage >= Stage.ROLL_CMD else None )
         self.attitude_command.resample_command(self.all_envs_idx)
 
-        variable_height = self.curriculum_level >= Stage.VARIABLE_HEIGHT
-        self.height_command.range = HEIGHT_COMMAND_MINMAX if variable_height else (HEIGHT_MID, HEIGHT_MID)
-        self.height_command.resample_time_sec = 2.0 if variable_height else None
+        self.height_command.range = lim_height
+        self.height_command.resample_time_sec = 2.0 if stage >= Stage.VARIABLE_HEIGHT else None
         self.height_command.resample_command(self.all_envs_idx)
-        if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.0:
+
+        if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.01:
             self.log("relaxed legs enabled")
-            sym.weight = 0.0
-            # self.reward_manager["hip_flexor_alignment"].weight  = 0.0
+            sym.weight = 0.01
 
     def _add_observation_noise(
         self, value: torch.Tensor, standard_deviation: float
@@ -465,7 +478,7 @@ class PuckStandEnv(ManagedEnvironment):
         )
 
     def _update_curriculum(self) -> None:
-        if self.curriculum_level >= MAX_CURRICULUM_LEVEL:
+        if self.curriculum_level > Stage.Max:
             return
         if self.step_count < self.next_curriculum_check_step:
             return
@@ -482,10 +495,17 @@ class PuckStandEnv(ManagedEnvironment):
         enough_survival = averages.episode_length >= (CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0))
         track_fails = averages.tracks_baseline(MIN_TRACKING_THRESHOLD)
 
+        stage : int = math.floor(self.curriculum_level)
+        sub_level : float = round(self.curriculum_level - stage, 6)
+
         if not track_fails and enough_survival:
-            self.curriculum_level += 1
+            if self.sub_level_step > 0 and sub_level + self.sub_level_step < 1.0 - 1e-6:
+                self.curriculum_level = round(self.curriculum_level + self.sub_level_step, 6)
+                self.log(f"Sub-level BUMP avgs: {averages}")
+            else:
+                self.curriculum_level = float(stage + 1)
+                self.log(f"Curriculum BUMP avgs: {averages}")
             self._apply_curriculum_stage()
-            self.log(f"Curriculum BUMP avgs: {averages}")
         else:
             self.log(f"Curriculum hold: track-{'ok' if not track_fails else ','.join(track_fails)} len {averages.episode_length:0.1f} avgs: {averages}")
         self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
@@ -515,7 +535,7 @@ class PuckStandEnv(ManagedEnvironment):
             episode["Curriculum/side max"] = rval(self.velocity_command.range, "lin_vel_x")
         if self.curriculum_level >= Stage.VARIABLE_HEIGHT:
             episode["Curriculum/height max"] = rval(tuple(self.height_command.range))
-        if self.curriculum_level >= Stage.VARIABLE_ATTITUDE:
+        if self.curriculum_level >= Stage.PITCH_CMD:
             episode["Curriculum/pitch max"] = rval(self.attitude_command.range, 'pitch')
             episode["Curriculum/roll max"] = rval(self.attitude_command.range, 'roll')
 
@@ -569,12 +589,12 @@ class PuckStandEnv(ManagedEnvironment):
         return value.unsqueeze(0) if value.ndim == 1 else value
 
     def stagename(self) -> str:
-        level = min(self.curriculum_level, Stage.Max)
-        stage = max((stage for stage in Stage if stage.value <= level), default=None, key=lambda stage: stage.value)
-        if stage is None:
+        stage : int = math.floor(self.curriculum_level)
+        sub_level : float = round(self.curriculum_level - stage, 6)
+        try:
+            return f"{Stage(stage).name}+{sub_level}"
+        except ValueError:
             return f"Stage({self.curriculum_level})"
-        offset = level - stage.value
-        return f"{stage.name}+{offset}" if offset else f"{stage.name}({self.curriculum_level})"
     def logbase(self, * args, **kwargs) -> None:
         if self.periodic_outfile:
             with open(self.periodic_outfile, 'a') as f:
@@ -582,5 +602,5 @@ class PuckStandEnv(ManagedEnvironment):
         print(*args, **kwargs)
     def log(self, * args, **kwargs) -> None:
         # report learning iteration
-        self.logbase(f"training@[c{self.stagename()}|{self.curriculum_level} s{self.step_count}] ", *args, **kwargs)
+        self.logbase(f"training@[c{self.stagename()}|{self.curriculum_level:.2f} s{self.step_count}] ", *args, **kwargs)
 
