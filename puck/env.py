@@ -60,11 +60,11 @@ class CurriculumMetrics:
     height: float
     episode_length: float
 
-    def tracks_baseline(self, threshold: float) -> list[str]:
+    def tracks_baseline(self, thresholds: CurriculumMetrics) -> list[str]:
         failing = []
         for field in dataclasses.fields(self):
-            if field.name == 'episode_length': continue
-            if getattr(self, field.name) <= threshold: failing.append(field.name)
+            if getattr(self, field.name) <= getattr(thresholds, field.name):
+                failing.append(field.name)
         return failing
 
 def ground_contact_failure(env) -> torch.Tensor:
@@ -324,7 +324,7 @@ class PuckStandEnv(ManagedEnvironment):
                 "height_tracking":      { "weight": 3.0, "fn": height_tracking },
                 # penalize high-frequency actions to encourage smooth control
                 "action_rate_limbs":    {"weight": -0.01, "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.action_manager)},
-                "action_rate_wheels":   {"weight": -0.02,  "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
+                "action_rate_wheels":   {"weight": -0.01,  "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
             },
         )
         gf_mgrs.TerminationManager(
@@ -487,18 +487,20 @@ class PuckStandEnv(ManagedEnvironment):
         if len(self.curriculum_samples) < CURRICULUM_AVG_SAMPLES:
             return
 
+        stage : int = math.floor(self.curriculum_level)
+        sub_level : float = round(self.curriculum_level - stage, 6)
+
         average_values = torch.tensor(
             [dataclasses.astuple(sample) for sample in self.curriculum_samples]
         ).mean(dim=0).tolist()
         averages: CurriculumMetrics = CurriculumMetrics(*average_values)
 
-        enough_survival = averages.episode_length >= (CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0))
-        track_fails = averages.tracks_baseline(MIN_TRACKING_THRESHOLD)
+        min_len = CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0)
+        thresholds = CurriculumMetrics(*[MIN_TRACKING_THRESHOLD] * 6, episode_length=min_len)
+        if stage < Stage.YAW_COMMAND: thresholds.yaw = 0.7 #lower standards
+        track_fails = averages.tracks_baseline(thresholds)
 
-        stage : int = math.floor(self.curriculum_level)
-        sub_level : float = round(self.curriculum_level - stage, 6)
-
-        if not track_fails and enough_survival:
+        if not track_fails:
             if self.sub_level_step > 0 and sub_level + self.sub_level_step < 1.0 - 1e-6:
                 self.curriculum_level = round(self.curriculum_level + self.sub_level_step, 6)
                 self.log(f"Sub-level BUMP avgs: {averages}")
@@ -507,7 +509,7 @@ class PuckStandEnv(ManagedEnvironment):
                 self.log(f"Curriculum BUMP avgs: {averages}")
             self._apply_curriculum_stage()
         else:
-            self.log(f"Curriculum hold: track-{'ok' if not track_fails else ','.join(track_fails)} len {averages.episode_length:0.1f} avgs: {averages}")
+            self.log(f"Curriculum hold: {'ok' if not track_fails else ','.join(track_fails)} len {averages.episode_length:0.1f} avgs: {averages}")
         self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
         self.curriculum_samples.clear()
 

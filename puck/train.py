@@ -51,7 +51,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--resume", type=pathlib.Path, help="Resume from an existing model")
-    parser.add_argument("--curriculum", default=0, type=int, help="Curriculum level to start training")
+    parser.add_argument("--curriculum", default=0, type=float, help="Curriculum level to start training")
     parser.add_argument("log_dir", type=pathlib.Path, nargs="?", default=None)
     parser.add_argument("--video-every", type=int, default=25, help="Record a video every N iterations")
     parser.add_argument("--video-len", type=float, default=10.0, help="Video length in seconds")
