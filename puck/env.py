@@ -49,6 +49,13 @@ class Stage(enum.IntEnum):
 ATTITUDE_TARGET_LIMIT = 0.15
 ATTITUDE_TRACKING_SCALE = 0.15
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
+TERRAIN_SUB_LEVELS = (
+    "flat_terrain",
+    "random_uniform_terrain",
+    "wave_terrain",
+    "discrete_obstacles_terrain",
+    "stepping_stones_terrain",
+)
 
 @dataclasses.dataclass
 class CurriculumMetrics:
@@ -131,21 +138,33 @@ class PuckStandEnv(ManagedEnvironment):
         terrain_texture[terrain_pixels == 0] = (62, 74, 80)
         terrain_texture[terrain_pixels == 1] = (84, 96, 100)
         self.terrain = self.scene.add_entity(
-            surface=gs.surfaces.Default(
-                diffuse_texture=gs.textures.ImageTexture(
-                    image_array=terrain_texture
-                )
-            ),
+            surface=gs.surfaces.Default(diffuse_texture=gs.textures.ImageTexture(image_array=terrain_texture)),
             morph=gs.morphs.Terrain(
-                n_subterrains=(1, 2),
+                n_subterrains=(1, len(TERRAIN_SUB_LEVELS)),
                 subterrain_size=(48, 24),
-                subterrain_types=[["flat_terrain", "random_uniform_terrain"]],
+                subterrain_types=[list(TERRAIN_SUB_LEVELS)],
                 subterrain_parameters={
                     "random_uniform_terrain": {
                         "min_height": 0.0,
-                        "max_height": 0.08,
-                        "step": 0.04,
+                        "max_height": 0.025,
+                        "step": 0.01,
                         "downsampled_scale": 0.25,
+                    },
+                    "wave_terrain": {
+                        "num_waves": 2.0,
+                        "amplitude": 0.025,
+                    },
+                    "discrete_obstacles_terrain": {
+                        "max_height": 0.04,
+                        "min_size": 0.3,
+                        "max_size": 1.0,
+                        "num_rects": 30,
+                    },
+                    "stepping_stones_terrain": {
+                        "stone_size": 0.8,
+                        "stone_distance": 0.2,
+                        "max_height": 0.04,
+                        "platform_size": 2.0,
                     },
                 },
             ),
@@ -397,7 +416,14 @@ class PuckStandEnv(ManagedEnvironment):
 
     @property
     def curriculum_terrain(self) -> str:
-        return "random_uniform_terrain" if self.curriculum_level >= Stage.ROUGH_TERRAIN else "flat_terrain"
+        if self.curriculum_level < Stage.ROUGH_TERRAIN:
+            return TERRAIN_SUB_LEVELS[0]
+        sub_level = self.curriculum_level - Stage.ROUGH_TERRAIN
+        terrain_idx = min(
+            int(sub_level * len(TERRAIN_SUB_LEVELS) + 1e-6),
+            len(TERRAIN_SUB_LEVELS) - 1,
+        )
+        return TERRAIN_SUB_LEVELS[terrain_idx]
 
     def _apply_curriculum_stage(self) -> None:
         # set each limit to the initial
@@ -411,7 +437,7 @@ class PuckStandEnv(ManagedEnvironment):
         stage : int = math.floor(self.curriculum_level)
         sub_level : float = round(self.curriculum_level - stage, 6)
 
-        self.sub_level_step = 0.1 if stage >= Stage.FWD_CMD and stage < Stage.ROUGH_TERRAIN else 0.0
+        self.sub_level_step = 0.1 if stage >= Stage.FWD_CMD else 0.0
 
         # for each stage- map self.sub_level to expand the range
         if self.curriculum_level >= Stage.FWD_CMD:
@@ -434,7 +460,8 @@ class PuckStandEnv(ManagedEnvironment):
                     HEIGHT_MID + sub_level * (HEIGHT_COMMAND_MINMAX[1] - HEIGHT_MID)
                 )
             else: lim_height = HEIGHT_COMMAND_MINMAX
-        # TODO, see if terrain can be modified this way in runtime
+        if stage == Stage.ROUGH_TERRAIN:
+            self.sub_level_step = 1.0 / len(TERRAIN_SUB_LEVELS)
 
         # apply limits
         self.velocity_command.range = {
