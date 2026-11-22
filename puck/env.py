@@ -27,21 +27,22 @@ HEIGHT_COMMAND_MINMAX = (0.1, 0.5)
 HEIGHT_MID = INITIAL_ROOT_POSITION[2]
 INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
-MAX_SIDE_VELOCITY = 1.0 #m/s
-MAX_YAW_VELOCITY = 5.0 #rad/s
-MAX_VEL_ACCEL = ( 1.5, 1.5, 0.5 )  # m/s^2, m/s^2, rad/s^2
+MAX_SIDE_VELOCITY = 0.4 #m/s
+MAX_YAW_VELOCITY = 3.0 #rad/s
+MAX_VEL_ACCEL = ( 1.0, 1.0, 0.4 )  # m/s^2, m/s^2, rad/s^2
+VEL_CMD_SCALES = (1 / 2.0, 1 / 10.0, 1 / 10.0) #allow headroom in scaling
 VELOCITY_TRACKING_SENSITIVITY = 0.2 #m/s
 YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
 # Staging:
 class Stage(enum.IntEnum):
     INITIAL = 0
-    ADD_NOISE = 1
-    FWD_CMD = 2
-    FWDBACK_CMD = 3
-    YAW_COMMAND = 4
-    VARIABLE_HEIGHT = 5
-    PITCH_CMD = 6
-    ROLL_CMD = 7
+    FWD_CMD = 1
+    FWDBACK_CMD = 2
+    YAW_COMMAND = 3
+    VARIABLE_HEIGHT = 4
+    PITCH_CMD = 5
+    ROLL_CMD = 6
+    ADD_NOISE = 7
     ROUGH_TERRAIN = 8
     SIDE_VELOCITY = 9
     Max = SIDE_VELOCITY
@@ -216,7 +217,7 @@ class PuckStandEnv(ManagedEnvironment):
             entity.set_quat(quat, envs_idx=envs_idx, zero_velocity=True)
 
         cmd_scale = torch.tensor(
-            [1/MAX_SIDE_VELOCITY, 1/MAX_FORWARD_VELOCITY, 1/MAX_YAW_VELOCITY],
+            VEL_CMD_SCALES,
             device=gs.device
         )
 
@@ -242,11 +243,14 @@ class PuckStandEnv(ManagedEnvironment):
         )
         self.velocity_command = gf_mgrs.VelocityCommandManager(
             self,
+            stopped_probability=0.1,
             range={
                 "lin_vel_x": (0.0, 0.0),
                 "lin_vel_y": (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY), #start training with initial small forward velocity
                 "ang_vel_z": (0.0, 0.0),
             },
+            resample_time_sec=5.0,
+            debug_visualizer=True,
         )
         self.cmd_smooth = self.velocity_command.command.clone()
         self._cmd_slew_max = torch.tensor(MAX_VEL_ACCEL, device=gs.device, dtype=gs.tc_float)
@@ -383,10 +387,6 @@ class PuckStandEnv(ManagedEnvironment):
 
             return self.actuator_manager.get_dofs_force() * torque_scales
 
-        def velocity_command_observation(env):
-            # return the smoothed velocity command
-            return self.cmd_smooth * cmd_scale
-
         self.observation_manager = gf_mgrs.ObservationManager(
             self,
             cfg={
@@ -406,7 +406,7 @@ class PuckStandEnv(ManagedEnvironment):
                     "clip": (-1.0, 1.0),
                     "units": "normalized",
                 },
-                "velocity_command": { "fn": velocity_command_observation, "clip": (-1.0, 1.0) },
+                "velocity_command": { "fn": lambda env: self.cmd_smooth * cmd_scale },
                 "actions": { "fn": gf_mdp.observations.current_actions(), "clip": (-1.0, 1.0) },
             },
             history_len=5,
@@ -469,27 +469,17 @@ class PuckStandEnv(ManagedEnvironment):
             "lin_vel_y": (-lim_vel_fwd, lim_vel_bck),
             "ang_vel_z": (-lim_vel_yaw, lim_vel_yaw),
         }
-        self.velocity_command.resample_time_sec = 2.0
-        self.velocity_command.resample_command(self.all_envs_idx)
         self.attitude_command.range = {
             "pitch": (-lim_pitch, lim_pitch),
             "roll": (-lim_roll, lim_roll),
         }
-        self.attitude_command.resample_time_sec = ( 2.0 if stage >= Stage.ROLL_CMD else None )
-        self.attitude_command.resample_command(self.all_envs_idx)
-
         self.height_command.range = lim_height
-        self.height_command.resample_time_sec = 2.0 if stage >= Stage.VARIABLE_HEIGHT else None
-        self.height_command.resample_command(self.all_envs_idx)
-
         if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.01:
             self.log("relaxed legs enabled")
             sym.weight = 0.01
 
-    def _add_observation_noise(
-        self, value: torch.Tensor, standard_deviation: float
-    ) -> torch.Tensor:
-        if self.curriculum_level < 1:
+    def _add_observation_noise(self, value: torch.Tensor, standard_deviation: float) -> torch.Tensor:
+        if self.curriculum_level < Stage.ADD_NOISE:
             return value
         return value + torch.randn_like(value) * standard_deviation
 
@@ -536,7 +526,8 @@ class PuckStandEnv(ManagedEnvironment):
                 self.log(f"Curriculum BUMP avgs: {averages}")
             self._apply_curriculum_stage()
         else:
-            self.log(f"Curriculum hold: {'ok' if not track_fails else ','.join(track_fails)} len {averages.episode_length:0.1f} avgs: {averages}")
+            avgstr = ", ".join(f"{k}={v:0.2f}" for k, v in averages.__dict__.items())
+            self.log(f"Curriculum hold: {'ok' if not track_fails else ','.join(track_fails)} avgs: {avgstr}")
         self.next_curriculum_check_step = (self.step_count + CURRICULUM_CHECK_EVERY_STEPS)
         self.curriculum_samples.clear()
 
@@ -548,25 +539,21 @@ class PuckStandEnv(ManagedEnvironment):
         observations_batch, reward, terminated, truncated, extras = super().step(actions)
         episode = extras.setdefault("episode", {})
         episode["Curriculum/level"] = self.curriculum_level
-
-        def rval(range, key: str | None = None, usemin = True):
-            if isinstance(range, dict) and key is not None: range = range[key]
-            if isinstance(range, (tuple, list)) and len(range) == 2: return float(range[0]) if usemin else range[1]
-            print(f"unexpected range type {type(range)} value {range} key {key}")
-            return 0.0
+        wheel_rpm = self.wheel_action_manager.get_dofs_velocity() * (60.0 / (2.0 * math.pi))
+        episode["Diagnostics/wheel_rpm"] = wheel_rpm.abs().mean().item()
+        episode["Diagnostics/wheel_rpm_max"] = wheel_rpm.abs().max().item()
 
         # report command max/min values if enabled
-        if self.curriculum_level >= Stage.FWD_CMD:
-            episode["Curriculum/velcmd max"] = rval(self.velocity_command.range, 'lin_vel_y')
-        if self.curriculum_level >= Stage.YAW_COMMAND:
-            episode["Curriculum/yaw max"] = rval(self.velocity_command.range, "ang_vel_z")
-        if self.curriculum_level >= Stage.SIDE_VELOCITY:
-            episode["Curriculum/side max"] = rval(self.velocity_command.range, "lin_vel_x")
-        if self.curriculum_level >= Stage.VARIABLE_HEIGHT:
-            episode["Curriculum/height max"] = rval(tuple(self.height_command.range))
-        if self.curriculum_level >= Stage.PITCH_CMD:
-            episode["Curriculum/pitch max"] = rval(self.attitude_command.range, 'pitch')
-            episode["Curriculum/roll max"] = rval(self.attitude_command.range, 'roll')
+        target = self.cmd_smooth[:, 1] #fwd command
+        if   self.curriculum_level >= Stage.YAW_COMMAND:    target = self.cmd_smooth[:, 2]
+        elif self.curriculum_level >= Stage.SIDE_VELOCITY:  target = self.cmd_smooth[:, 0]
+        elif self.curriculum_level >= Stage.VARIABLE_HEIGHT:target = self.height_command.command
+        elif self.curriculum_level >= Stage.PITCH_CMD:      target = self.attitude_command.command[:, 0]
+        elif self.curriculum_level >= Stage.ROLL_CMD:       target = self.attitude_command.command[:, 1]
+        episode["Curriculum/target max"] = target.max().item()
+        episode["Curriculum/target min"] = target.min().item()
+        episode["Curriculum/target mean"] = target.mean().item()
+        episode["Curriculum/target std"] = target.std().item()
 
         actual_height = (self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1]))
         episode["Diagnostics/height"] = actual_height.mean().item()
