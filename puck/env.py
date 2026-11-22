@@ -36,15 +36,15 @@ YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
 # Staging:
 class Stage(enum.IntEnum):
     INITIAL = 0
-    FWD_CMD = 1
-    FWDBACK_CMD = 2
-    YAW_COMMAND = 3
-    VARIABLE_HEIGHT = 4
-    PITCH_CMD = 5
-    ROLL_CMD = 6
-    ADD_NOISE = 7
-    ROUGH_TERRAIN = 8
-    SIDE_VELOCITY = 9
+    VARIABLE_HEIGHT = enum.auto()
+    FWD_CMD = enum.auto()
+    FWDBACK_CMD = enum.auto()
+    YAW_COMMAND = enum.auto()
+    PITCH_CMD = enum.auto()
+    ROLL_CMD = enum.auto()
+    ADD_NOISE = enum.auto()
+    ROUGH_TERRAIN = enum.auto()
+    SIDE_VELOCITY = enum.auto()
     Max = SIDE_VELOCITY
 
 ATTITUDE_TARGET_LIMIT = 0.15
