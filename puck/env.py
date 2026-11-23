@@ -30,6 +30,8 @@ MAX_FORWARD_VELOCITY = 2.0 #m/s
 MAX_SIDE_VELOCITY = 0.4 #m/s
 MAX_YAW_VELOCITY = 3.0 #rad/s
 MAX_VEL_ACCEL = ( 1.0, 1.0, 0.4 )  # m/s^2, m/s^2, rad/s^2
+MAX_HEIGHT_ACCEL = 0.1 #m/s^2
+MAX_ATTITUDE_ACCEL = 0.1 #rad/s^2
 VEL_CMD_SCALES = (1 / 2.0, 1 / 10.0, 1 / 10.0) #allow headroom in scaling
 VELOCITY_TRACKING_SENSITIVITY = 0.2 #m/s
 YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
@@ -252,13 +254,16 @@ class PuckStandEnv(ManagedEnvironment):
             resample_time_sec=5.0,
             debug_visualizer=True,
         )
-        self.cmd_smooth = self.velocity_command.command.clone()
         self._cmd_slew_max = torch.tensor(MAX_VEL_ACCEL, device=gs.device, dtype=gs.tc_float)
 
         self.height_command = gf_mgrs.CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
         self.attitude_command = gf_mgrs.CommandManager(
             self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
         )
+        self.cmd_smooth = self.velocity_command.command.clone()
+        self.height_smooth = self.height_command.command[:, 0].clone()
+        self.pitch_smooth = self.attitude_command.command[:, 0].clone()
+        self.roll_smooth = self.attitude_command.command[:, 1].clone()
 
         def square_linear_error(error: torch.Tensor, scale: float) -> torch.Tensor:
             '''exponential reward with additial linear penalty to provide gradient pressure for large errors'''
@@ -290,25 +295,18 @@ class PuckStandEnv(ManagedEnvironment):
             actual = self.entity_manager.get_angular_velocity()[:, 2]
             return square_linear_error(actual - target, YAW_TRACKING_SENSITIVITY)
 
-        def attitude_tracking(axis: str):
-            axis_index = {"roll": 0, "pitch": 1}[axis]
-
-            def reward(env) -> torch.Tensor:
-                body_rpy = gs_util_geom.quat_to_xyz(
-                    self.entity_manager.base_quat, rpy=True
-                )
-                target = self.attitude_command.get_command(axis).reshape(-1)
-                error = body_rpy[:, axis_index] - target
-                assert isinstance(error, torch.Tensor)
-                error = torch.atan2(torch.sin(error), torch.cos(error))
-                return torch.exp(-(error / ATTITUDE_TRACKING_SCALE).square())
-
-            return reward
+        def pitch_tracking(env) -> torch.Tensor:
+            body_rpy = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)
+            actual = body_rpy[:, 1]
+            return square_linear_error(actual - self.pitch_smooth, 0.2)
+        def roll_tracking(env) -> torch.Tensor:
+            body_rpy = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)
+            actual = body_rpy[:, 0]
+            return square_linear_error(actual - self.roll_smooth, 0.2)
 
         def height_tracking(env) -> torch.Tensor:
-            target = self.height_command.command.reshape(-1)
             actual = self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1])
-            return torch.exp(-(actual - target).abs() / 0.05) # Laplace: slope doesn't vanish near 0
+            return torch.exp(-(actual - self.height_smooth).abs() / 0.05) # Laplace: slope doesn't vanish near 0
 
         def hip_knee_symmetry_reward(env) -> torch.Tensor:
             '''Reward symmetrical hip & knee (values are inverted between l / r)'''
@@ -340,8 +338,8 @@ class PuckStandEnv(ManagedEnvironment):
                 "yaw_velocity":         { "weight": 1.0, "fn": yaw_velocity_tracking },
                 "forward_velocity":     { "weight": 2.0, "fn": forward_velocity_tracking },
                 "side_velocity":        { "weight": 1.0, "fn": side_velocity_tracking },
-                "pitch_tracking":       { "weight": 1.0, "fn": attitude_tracking("pitch") },
-                "roll_tracking":        { "weight": 1.0, "fn": attitude_tracking("roll") },
+                "pitch_tracking":       { "weight": 1.0, "fn": pitch_tracking },
+                "roll_tracking":        { "weight": 1.0, "fn": roll_tracking },
                 "leg_symmetry":         { "weight": 1.0, "fn": hip_knee_symmetry_reward },
                 "hip_flexor_alignment": { "weight": 1.5, "fn": hip_flexor_alignment },
                 "height_tracking":      { "weight": 3.0, "fn": height_tracking },
@@ -396,16 +394,12 @@ class PuckStandEnv(ManagedEnvironment):
                 "wheel_velocity": {"fn": lambda env: self.wheel_action_manager.get_dofs_velocity(), "scale": 0.03, "clip": (-1, 1)},
                 "joint_torque":   {"fn": joint_torque_observation, "clip": (-1.0, 1.0) },
                 "height_command": {
-                    "fn": lambda env: (self.height_command.command - HEIGHT_COMMAND_MID) / HEIGHT_RANGE_SCALE,
+                    "fn": lambda env: ((self.height_smooth - HEIGHT_COMMAND_MID) / HEIGHT_RANGE_SCALE).unsqueeze(-1),
                     "clip": (-1.0, 1.0),
                     "units": "normalized",
                 },
-                "attitude_command": {
-                    "fn": self.attitude_command.observation,
-                    "scale": 1.0 / ATTITUDE_TARGET_LIMIT,
-                    "clip": (-1.0, 1.0),
-                    "units": "normalized",
-                },
+                "pitch_command": {"fn": lambda env: (self.pitch_smooth / ATTITUDE_TARGET_LIMIT).unsqueeze(-1), "clip": (-1.0, 1.0), "units": "normalized"},
+                "roll_command": {"fn": lambda env: (self.roll_smooth / ATTITUDE_TARGET_LIMIT).unsqueeze(-1), "clip": (-1.0, 1.0), "units": "normalized"},
                 "velocity_command": { "fn": lambda env: self.cmd_smooth * cmd_scale },
                 "actions": { "fn": gf_mdp.observations.current_actions(), "clip": (-1.0, 1.0) },
             },
@@ -532,10 +526,11 @@ class PuckStandEnv(ManagedEnvironment):
         self.curriculum_samples.clear()
 
     def step(self, actions: torch.Tensor):
-        if self.cmd_smooth is not None:
-            raw = self.velocity_command.command # (N, 3) target
-            delta = (raw - self.cmd_smooth).clamp(-self._cmd_slew_max * self.dt, self._cmd_slew_max * self.dt)
-            self.cmd_smooth += delta
+        self.cmd_smooth    += (self.velocity_command.command        -    self.cmd_smooth).clamp(-self._cmd_slew_max * self.dt, self._cmd_slew_max * self.dt)
+        self.height_smooth += (self.height_command.command[:, 0]    - self.height_smooth).clamp(-MAX_HEIGHT_ACCEL * self.dt, MAX_HEIGHT_ACCEL * self.dt)
+        self.pitch_smooth  += (self.attitude_command.command[:, 0]  -  self.pitch_smooth).clamp(-MAX_ATTITUDE_ACCEL * self.dt, MAX_ATTITUDE_ACCEL * self.dt)
+        self.roll_smooth   += (self.attitude_command.command[:, 1]  -   self.roll_smooth).clamp(-MAX_ATTITUDE_ACCEL * self.dt, MAX_ATTITUDE_ACCEL * self.dt)
+
         observations_batch, reward, terminated, truncated, extras = super().step(actions)
         episode = extras.setdefault("episode", {})
         episode["Curriculum/level"] = self.curriculum_level
@@ -547,9 +542,9 @@ class PuckStandEnv(ManagedEnvironment):
         target = self.cmd_smooth[:, 1] #fwd command
         if   self.curriculum_level >= Stage.YAW_COMMAND:    target = self.cmd_smooth[:, 2]
         elif self.curriculum_level >= Stage.SIDE_VELOCITY:  target = self.cmd_smooth[:, 0]
-        elif self.curriculum_level >= Stage.VARIABLE_HEIGHT:target = self.height_command.command
-        elif self.curriculum_level >= Stage.PITCH_CMD:      target = self.attitude_command.command[:, 0]
-        elif self.curriculum_level >= Stage.ROLL_CMD:       target = self.attitude_command.command[:, 1]
+        elif self.curriculum_level >= Stage.VARIABLE_HEIGHT:target = self.height_smooth
+        elif self.curriculum_level >= Stage.PITCH_CMD:      target = self.pitch_smooth
+        elif self.curriculum_level >= Stage.ROLL_CMD:       target = self.roll_smooth
         episode["Curriculum/target max"] = target.max().item()
         episode["Curriculum/target min"] = target.min().item()
         episode["Curriculum/target mean"] = target.mean().item()
@@ -595,6 +590,9 @@ class PuckStandEnv(ManagedEnvironment):
         self.robot.zero_all_dofs_velocity(reset_ids)
         self.entity_manager.step()
         self.cmd_smooth[reset_ids] = self.velocity_command.command[reset_ids]
+        self.height_smooth[reset_ids] = self.height_command.command[reset_ids, 0]
+        self.pitch_smooth[reset_ids] = self.attitude_command.command[reset_ids, 0]
+        self.roll_smooth[reset_ids] = self.attitude_command.command[reset_ids, 1]
 
         if env_ids is not None and len(reset_ids) > 0: self._update_curriculum()
         if env_ids is None: observations_batch = self.get_observations()
