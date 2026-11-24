@@ -122,7 +122,7 @@ class PuckStandEnv(ManagedEnvironment):
             # max_episode_random_scaling=0.3, #TODO, but throws error when enabled
         )
         self.curriculum_level : float = Stage.INITIAL.value #remainder is sub-level
-        self.sub_level_step = 1.0 #default. each curriculum stage can change this, 0 or 1 disables
+        self.sub_level_step = 0.0 #default. each curriculum stage can change this, 0 or 1 disables
         self.curriculum_samples: list[CurriculumMetrics] = []
         self.next_curriculum_check_step = CURRICULUM_CHECK_EVERY_STEPS
         self._last_reset_mean_ep_length = 0.0
@@ -200,6 +200,11 @@ class PuckStandEnv(ManagedEnvironment):
             smoothing=0.9,
         )
         self.periodic_outfile : pathlib.Path | None = None
+
+    def get_stage(self) -> tuple[Stage, float]:
+        stage : int = math.floor(self.curriculum_level)
+        sub_level : float = round(self.curriculum_level - stage, 2)
+        return Stage(stage), sub_level
 
     def config(self) -> None:
         """Configure standing-pose actions, commands, rewards, and observations."""
@@ -428,10 +433,9 @@ class PuckStandEnv(ManagedEnvironment):
         lim_roll = 0
         lim_height = (HEIGHT_MID, HEIGHT_MID)
         lim_vel_side = 0
-        stage : int = math.floor(self.curriculum_level)
-        sub_level : float = round(self.curriculum_level - stage, 6)
 
         self.sub_level_step = 0.1 if stage >= Stage.FWD_CMD else 0.0
+        stage, sub_level = self.get_stage()
 
         # for each stage- map self.sub_level to expand the range
         if self.curriculum_level >= Stage.FWD_CMD:
@@ -498,8 +502,7 @@ class PuckStandEnv(ManagedEnvironment):
         if len(self.curriculum_samples) < CURRICULUM_AVG_SAMPLES:
             return
 
-        stage : int = math.floor(self.curriculum_level)
-        sub_level : float = round(self.curriculum_level - stage, 6)
+        stage, sub_level = self.get_stage()
 
         average_values = torch.tensor(
             [dataclasses.astuple(sample) for sample in self.curriculum_samples]
@@ -603,8 +606,7 @@ class PuckStandEnv(ManagedEnvironment):
         return value.unsqueeze(0) if value.ndim == 1 else value
 
     def stagename(self) -> str:
-        stage : int = math.floor(self.curriculum_level)
-        sub_level : float = round(self.curriculum_level - stage, 6)
+        stage, sub_level = self.get_stage()
         try:
             return f"{Stage(stage).name}+{sub_level}"
         except ValueError:
