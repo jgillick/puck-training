@@ -20,7 +20,6 @@ STANDING_JOINT_POSITIONS = {
     "flexor_l": 0.0,
 }
 CURRICULUM_CHECK_EVERY_STEPS = 400
-CURRICULUM_AVG_SAMPLES = 5
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 MIN_TRACKING_THRESHOLD = 0.8 #threshold for tracking performance to advance curriculum
 HEIGHT_COMMAND_MINMAX = (0.1, 0.5)
@@ -59,6 +58,8 @@ TERRAIN_SUB_LEVELS = (
     "discrete_obstacles_terrain",
     "stepping_stones_terrain",
 )
+CURRICULUM_MAX_SAMPLES : typing.Final[int] = 40
+
 
 @dataclasses.dataclass
 class CurriculumMetrics:
@@ -497,9 +498,7 @@ class PuckStandEnv(ManagedEnvironment):
             return
         if self.step_count < self.next_curriculum_check_step:
             return
-
-        self.curriculum_samples.append(self._curriculum_metrics())
-        if len(self.curriculum_samples) < CURRICULUM_AVG_SAMPLES:
+        if len(self.curriculum_samples) < 10:
             return
 
         stage, sub_level = self.get_stage()
@@ -597,7 +596,11 @@ class PuckStandEnv(ManagedEnvironment):
         self.pitch_smooth[reset_ids] = self.attitude_command.command[reset_ids, 0]
         self.roll_smooth[reset_ids] = self.attitude_command.command[reset_ids, 1]
 
-        if env_ids is not None and len(reset_ids) > 0: self._update_curriculum()
+        if env_ids is not None and len(reset_ids) > 0:
+            self.curriculum_samples.append(self._curriculum_metrics())
+            if len(self.curriculum_samples) > CURRICULUM_MAX_SAMPLES:
+                self.curriculum_samples = self.curriculum_samples[-CURRICULUM_MAX_SAMPLES:]
+            self._update_curriculum()
         if env_ids is None: observations_batch = self.get_observations()
         return observations_batch, info
 
