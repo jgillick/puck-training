@@ -25,16 +25,16 @@
     <!-- Link body -->
     <body name="body" pos="0 0 0" quat="1 0 0 0" childclass="puck-mujoco">
       <freejoint name="body_freejoint"/>
-      <inertial pos="-0.000876921 -0.0252874 0.0694394" mass="1.413" fullinertia="0.00744648 0.00545121 0.00983263 4.07548e-06 -1.19151e-05 -0.000816192"/>
+      <inertial pos="0.0252874 -0.000876921 0.0694394" mass="1.413" fullinertia="0.00545121 0.00744648 0.00983263 -4.07548e-06 0.000816192 -1.19151e-05"/>
       <!-- Part body -->
-      <geom type="mesh" class="visual" pos="-0.143582 0.00164685 0.0697348" quat="0 0.00249662 -0 -0.999997" mesh="body" material="body_material"/>
-      <geom type="mesh" class="collision" pos="-0.143582 0.00164685 0.0697348" quat="0 0.00249662 -0 -0.999997" mesh="body" material="body_material"/>
+      <geom type="mesh" class="visual" pos="-0.00164685 -0.143582 0.0697348" quat="0.707105 0.00176538 0.00176538 -0.707105" mesh="body" material="body_material"/>
+      <geom type="mesh" class="collision" pos="-0.00164685 -0.143582 0.0697348" quat="0.707105 0.00176538 0.00176538 -0.707105" mesh="body" material="body_material"/>
       <!-- Part controller -->
-      <geom type="mesh" class="visual" pos="0.141812 -0.0107074 0.0723044" quat="0.995733 -0.0922482 -0.00248597 -0.000230309" mesh="controller" material="controller_material"/>
-      <geom type="mesh" class="collision" pos="0.141812 -0.0107074 0.0723044" quat="0.995733 -0.0922482 -0.00248597 -0.000230309" mesh="controller" material="controller_material"/>
-      <site name="imu" pos="0.141812 -0.0107074 0.0723044" quat="0.995733 -0.0922482 -0.00248597 -0.000230309" size="0.005"/>
+      <geom type="mesh" class="visual" pos="0.0107074 0.141812 0.0723044" quat="0.704252 -0.0634715 -0.0669872 0.703927" mesh="controller" material="controller_material"/>
+      <geom type="mesh" class="collision" pos="0.0107074 0.141812 0.0723044" quat="0.704252 -0.0634715 -0.0669872 0.703927" mesh="controller" material="controller_material"/>
+      <site name="imu" pos="0.0107074 0.141812 0.0723044" quat="0.704252 -0.0634715 -0.0669872 0.703927" size="0.005"/>
       <!-- Link flexor -->
-      <body name="flexor" pos="-0.12088 -0.0473531 0.0698481" quat="0.00176538 0.00176538 0.707105 -0.707105">
+      <body name="flexor" pos="0.0473531 -0.12088 0.0698481" quat="0.501247 -0.49875 0.501247 -0.49875">
         <!-- Joint from body to flexor -->
         <joint class="el05" axis="0 0 1" name="flexor_r" type="hinge" range="-1.5645433902012762 1.577049263388517"/>
         <inertial pos="0.0153772 -9.6154e-05 -0.0159997" mass="0.035" fullinertia="1.85262e-05 1.80802e-05 1.46279e-05 -2.789e-09 5.01391e-06 -3.1352e-08"/>
@@ -53,7 +53,8 @@
           <body name="shin" pos="-0.157569 -0.0277837 0" quat="0.984525 -0 0 0.175242">
             <!-- Joint from hamstring to shin -->
             <joint class="cybergear" axis="0 0 -1" name="knee_r" type="hinge" range="-3.493895383262293 1.5707963267948966"/>
-            <inertial pos="0.113783 -0.120071 0.0301305" mass="0.404" fullinertia="0.00423073 0.00126399 0.00536907 0.000164145 -0.000138572 0.000105135"/>
+            <!-- Hand-patched: the export placed the COM 10 cm off along local -Y. COM moved to the shin mesh centroid, inertia re-expressed about it. -->
+            <inertial pos="0.114454 -0.020181 0.028111" mass="0.404" fullinertia="0.000197965 0.00126216 0.00133777 0.000191224 -0.000139119 2.36369e-05"/>
             <!-- Part shin -->
             <geom type="mesh" class="visual" pos="0.157569 -0.0277837 -0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
             <geom type="mesh" class="collision" pos="0.157569 -0.0277837 -0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
@@ -70,7 +71,7 @@
         </body>
       </body>
       <!-- Link flexor_2 -->
-      <body name="flexor_2" pos="0.119117 -0.0473531 0.0710465" quat="0.707105 0.707105 -0.00176538 0.00176538">
+      <body name="flexor_2" pos="0.0473531 0.119117 0.0710465" quat="0.49875 0.501247 0.49875 0.501247">
         <!-- Joint from body to flexor_2 -->
         <joint class="el05" axis="0 0 1" name="flexor_l" type="hinge" range="-1.5718071742594475 1.5697854793303456"/>
         <inertial pos="0.0153775 1.55443e-05 -0.0159997" mass="0.035" fullinertia="1.85262e-05 1.80801e-05 1.46279e-05 4.51e-10 5.01401e-06 5.068e-09"/>
@@ -89,7 +90,8 @@
           <body name="shin_2" pos="-0.157569 -0.0277837 0" quat="0.984623 -0 0 0.174692">
             <!-- Joint from hamstring_2 to shin_2 -->
             <joint class="cybergear" axis="0 0 -1" name="knee_l" type="hinge" range="-2.0965145846637543 2.7904073209203686"/>
-            <inertial pos="0.113783 -0.120071 0.0301305" mass="0.404" fullinertia="0.00423073 0.00126399 0.00536907 0.000164145 -0.000138572 0.000105135"/>
+            <!-- Hand-patched: the export placed the COM 10 cm off along local -Y. COM moved to the shin mesh centroid, inertia re-expressed about it. -->
+            <inertial pos="0.114454 -0.020181 0.028111" mass="0.404" fullinertia="0.000197965 0.00126216 0.00133777 0.000191224 -0.000139119 2.36369e-05"/>
             <!-- Part shin_2 -->
             <geom type="mesh" class="visual" pos="0.157569 -0.0277837 0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
             <geom type="mesh" class="collision" pos="0.157569 -0.0277837 0" quat="0.454519 -0.541675 -0.454519 -0.541675" mesh="shin" material="shin_material"/>
