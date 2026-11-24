@@ -344,23 +344,26 @@ class PuckStandEnv(ManagedEnvironment):
             return torch.exp(-errors.square().mean(dim=1))
 
 
+        self.step2rwrd = {
+            Stage.FORWARD: "forward_velocity",
+            Stage.FWDBACK: "forward_velocity",
+            Stage.PITCH: "pitch_tracking",
+            Stage.HEIGHT: "height_tracking",
+            Stage.ROLL: "roll_tracking",
+            Stage.YAW: "yaw_velocity",
+            Stage.SIDE: "side_velocity",
+        }
         self.reward_manager = gf_mgrs.RewardManager(
             self,
             cfg={
-                "upright": {
-                    "weight": -5.0,
-                    "fn": gf_mdp.rewards.flat_orientation_l2(
-                        entity_manager=self.entity_manager
-                    ),
-                },
-                "yaw_velocity":         { "weight": 1.0, "fn": yaw_velocity_tracking },
-                "forward_velocity":     { "weight": 2.0, "fn": forward_velocity_tracking },
-                "side_velocity":        { "weight": 1.0, "fn": side_velocity_tracking },
-                "pitch_tracking":       { "weight": 1.0, "fn": pitch_tracking },
-                "roll_tracking":        { "weight": 1.0, "fn": roll_tracking },
+                self.step2rwrd[Stage.YAW]:     { "weight": 1.0, "fn": yaw_velocity_tracking },
+                self.step2rwrd[Stage.FORWARD]: { "weight": 1.0, "fn": forward_velocity_tracking },
+                self.step2rwrd[Stage.SIDE]:    { "weight": 1.0, "fn": side_velocity_tracking },
+                self.step2rwrd[Stage.PITCH]:   { "weight": 1.0, "fn": pitch_tracking },
+                self.step2rwrd[Stage.ROLL]:    { "weight": 1.0, "fn": roll_tracking },
+                self.step2rwrd[Stage.HEIGHT]:  { "weight": 1.0, "fn": height_tracking },
                 "leg_symmetry":         { "weight": 1.0, "fn": hip_knee_symmetry_reward },
                 "hip_flexor_alignment": { "weight": 1.5, "fn": hip_flexor_alignment },
-                "height_tracking":      { "weight": 3.0, "fn": height_tracking },
                 # penalize high-frequency actions to encourage smooth control
                 "action_rate_limbs":    {"weight": -0.01, "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.action_manager)},
                 "action_rate_wheels":   {"weight": -0.01,  "fn": gf_mdp.rewards.action_rate_l2(action_manager=self.wheel_action_manager)},
@@ -439,6 +442,19 @@ class PuckStandEnv(ManagedEnvironment):
         )
         return TERRAIN_SUB_LEVELS[terrain_idx]
 
+    def _set_weights(self, stage: Stage, active_weight: float = 3.0, base_weight = 1.0):
+        '''set reward weights based on active stage. keeps average overall weight! 4x for active reduces the others proportionally'''
+        activekey = self.step2rwrd.get(stage, None)
+        unique_rewards = len(set(self.step2rwrd.values())) #(6 items)
+        inactive_weight = (base_weight * unique_rewards - active_weight) / (unique_rewards - 1)
+        for reward_key in self.step2rwrd.values():
+            sym = self.reward_manager[reward_key]
+            if activekey is not None:
+                sym.weight = active_weight if (reward_key == activekey) else inactive_weight
+            else: sym.weight = base_weight
+        has_roll_cmd = self.attitude_command.get_command('roll').max() > 0
+        self.reward_manager["leg_symmetry"].weight = 0.01 if stage >= Stage.ROLL and has_roll_cmd else 1.0 #allow roll
+
     def _apply_curriculum_stage(self) -> None:
         # set each limit to the initial
         lim_vel_fwd = INITIAL_FORWARD_VELOCITY
@@ -490,6 +506,7 @@ class PuckStandEnv(ManagedEnvironment):
             "roll": (-lim_roll, lim_roll),
         }
         self.height_command.range = lim_height
+        self._set_weights(Stage(stage))
 
     def _add_observation_noise(self, value: torch.Tensor, standard_deviation: float) -> torch.Tensor:
         if self.curriculum_level < Stage.NOISE:
@@ -522,8 +539,13 @@ class PuckStandEnv(ManagedEnvironment):
         ).mean(dim=0).tolist()
         averages: CurriculumMetrics = CurriculumMetrics(*average_values)
 
-        min_len = CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0)
-        thresholds = CurriculumMetrics(*[MIN_TRACKING_THRESHOLD] * 6, episode_length=min_len)
+        thresholds = CurriculumMetrics(*[MIN_TRACKING_THRESHOLD] * 7)
+        if (stage_itm := Stage(stage)) in self.step2rwrd: #only for these Stages
+            for t_name in thresholds.__dict__:
+                if stage_itm.name.lower().count(t_name) <= 0: # is not contained in the stage name
+                    setattr(thresholds, t_name, 0.6) # lower standards for metrics not in the stage name
+        thresholds.episode_length = CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0)
+        print(f"Thresholds for stage {stage_itm}: {thresholds}")
         track_fails = averages.tracks_baseline(thresholds)
 
         if not track_fails:
