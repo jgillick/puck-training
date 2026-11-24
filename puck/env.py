@@ -1,4 +1,4 @@
-import math, pathlib, enum, dataclasses, torch, collections.abc, numpy
+import math, pathlib, enum, dataclasses, torch, collections.abc, numpy, typing, random
 import genesis as gs
 from genesis_forge import ManagedEnvironment
 from genesis.utils import geom as gs_util_geom
@@ -37,19 +37,18 @@ YAW_TRACKING_SENSITIVITY = 0.2 # rad/s
 # Staging:
 class Stage(enum.IntEnum):
     INITIAL = 0
-    VARIABLE_HEIGHT = enum.auto()
-    FWD_CMD = enum.auto()
-    FWDBACK_CMD = enum.auto()
-    YAW_COMMAND = enum.auto()
-    PITCH_CMD = enum.auto()
-    ROLL_CMD = enum.auto()
-    ADD_NOISE = enum.auto()
-    ROUGH_TERRAIN = enum.auto()
-    SIDE_VELOCITY = enum.auto()
-    Max = SIDE_VELOCITY
+    PITCH = enum.auto()
+    ROLL = enum.auto()
+    HEIGHT = enum.auto()
+    FORWARD = enum.auto()
+    FWDBACK = enum.auto()
+    YAW = enum.auto()
+    NOISE = enum.auto()
+    TERRAIN = enum.auto()
+    SIDE = enum.auto()
+    Max = SIDE
 
-ATTITUDE_TARGET_LIMIT = 0.15
-ATTITUDE_TRACKING_SCALE = 0.15
+ATTITUDE_TARGET_LIMIT = 45 * math.pi / 180 #degrees
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
 TERRAIN_SUB_LEVELS = (
     "flat_terrain",
@@ -214,7 +213,7 @@ class PuckStandEnv(ManagedEnvironment):
         def reset_pose(env, entity, envs_idx) -> None:
             pos = self.terrain_manager.generate_random_env_pos(
                 envs_idx=envs_idx,
-                usable_ratio=(CURRICULUM_SPAWN_USABLE_RATIO if self.curriculum_level >= Stage.ADD_NOISE else 0.0),
+                usable_ratio=(CURRICULUM_SPAWN_USABLE_RATIO if self.curriculum_level >= Stage.NOISE else 0.0),
                 subterrain=self.curriculum_terrain,
                 height_offset=INITIAL_ROOT_POSITION[2],
             )
@@ -416,9 +415,11 @@ class PuckStandEnv(ManagedEnvironment):
 
     @property
     def curriculum_terrain(self) -> str:
-        if self.curriculum_level < Stage.ROUGH_TERRAIN:
+        stage, sub_level = self.get_stage()
+        if stage < Stage.TERRAIN:
             return TERRAIN_SUB_LEVELS[0]
-        sub_level = self.curriculum_level - Stage.ROUGH_TERRAIN
+        elif stage > Stage.TERRAIN: #choose random level
+            sub_level = random.random()
         terrain_idx = min(
             int(sub_level * len(TERRAIN_SUB_LEVELS) + 1e-6),
             len(TERRAIN_SUB_LEVELS) - 1,
@@ -434,33 +435,36 @@ class PuckStandEnv(ManagedEnvironment):
         lim_roll = 0
         lim_height = (HEIGHT_MID, HEIGHT_MID)
         lim_vel_side = 0
-
-        self.sub_level_step = 0.1 if stage >= Stage.FWD_CMD else 0.0
         stage, sub_level = self.get_stage()
 
         # for each stage- map self.sub_level to expand the range
-        if self.curriculum_level >= Stage.FWD_CMD:
+        if self.curriculum_level >= Stage.FORWARD:
             # map lim_vel_fwd between INITIAL_FORWARD_VELOCITY and MAX_FORWARD_VELOCITY
-            lim_vel_fwd = INITIAL_FORWARD_VELOCITY + sub_level * (MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY) if (stage == Stage.FWD_CMD) else MAX_FORWARD_VELOCITY
-        if self.curriculum_level >= Stage.FWDBACK_CMD:
-            lim_vel_bck = sub_level * MAX_FORWARD_VELOCITY if (stage == Stage.FWDBACK_CMD) else MAX_FORWARD_VELOCITY
-        if self.curriculum_level >= Stage.YAW_COMMAND:
-            lim_vel_yaw = sub_level * MAX_YAW_VELOCITY if (stage == Stage.YAW_COMMAND) else MAX_YAW_VELOCITY
-        if self.curriculum_level >= Stage.SIDE_VELOCITY:
-            lim_vel_side = sub_level * MAX_SIDE_VELOCITY if (stage == Stage.SIDE_VELOCITY) else MAX_SIDE_VELOCITY
-        if self.curriculum_level >= Stage.PITCH_CMD:
-            lim_pitch = sub_level * ATTITUDE_TARGET_LIMIT if (stage == Stage.PITCH_CMD) else ATTITUDE_TARGET_LIMIT
-        if self.curriculum_level >= Stage.ROLL_CMD:
-            lim_roll = sub_level * ATTITUDE_TARGET_LIMIT if (stage == Stage.ROLL_CMD) else ATTITUDE_TARGET_LIMIT
-        if self.curriculum_level >= Stage.VARIABLE_HEIGHT:
-            if (stage == Stage.VARIABLE_HEIGHT):
+            lim_vel_fwd = INITIAL_FORWARD_VELOCITY + sub_level * (MAX_FORWARD_VELOCITY - INITIAL_FORWARD_VELOCITY) if (stage == Stage.FORWARD) else MAX_FORWARD_VELOCITY
+        if self.curriculum_level >= Stage.FWDBACK:
+            lim_vel_bck = sub_level * MAX_FORWARD_VELOCITY if (stage == Stage.FWDBACK) else MAX_FORWARD_VELOCITY
+        if self.curriculum_level >= Stage.YAW:
+            lim_vel_yaw = sub_level * MAX_YAW_VELOCITY if (stage == Stage.YAW) else MAX_YAW_VELOCITY
+        if self.curriculum_level >= Stage.SIDE:
+            lim_vel_side = sub_level * MAX_SIDE_VELOCITY if (stage == Stage.SIDE) else MAX_SIDE_VELOCITY
+        if self.curriculum_level >= Stage.PITCH:
+            lim_pitch = sub_level * ATTITUDE_TARGET_LIMIT if (stage == Stage.PITCH) else ATTITUDE_TARGET_LIMIT
+        if self.curriculum_level >= Stage.ROLL:
+            lim_roll = sub_level * ATTITUDE_TARGET_LIMIT if (stage == Stage.ROLL) else ATTITUDE_TARGET_LIMIT
+        if self.curriculum_level >= Stage.HEIGHT:
+            if (stage == Stage.HEIGHT):
                 lim_height = (
                     HEIGHT_MID - sub_level * (HEIGHT_MID - HEIGHT_COMMAND_MINMAX[0]),
                     HEIGHT_MID + sub_level * (HEIGHT_COMMAND_MINMAX[1] - HEIGHT_MID)
                 )
             else: lim_height = HEIGHT_COMMAND_MINMAX
-        if stage == Stage.ROUGH_TERRAIN:
+        self.sub_level_step = 0.2 #default, 5 levels
+        if stage == Stage.TERRAIN:
             self.sub_level_step = 1.0 / len(TERRAIN_SUB_LEVELS)
+        elif stage == Stage.INITIAL or stage == Stage.NOISE:
+            self.sub_level_step = 0.0 #one big step
+        elif stage == Stage.HEIGHT:
+            self.sub_level_step = 0.5 #two steps
 
         # apply limits
         self.velocity_command.range = {
@@ -473,23 +477,20 @@ class PuckStandEnv(ManagedEnvironment):
             "roll": (-lim_roll, lim_roll),
         }
         self.height_command.range = lim_height
-        if self.curriculum_level >= Stage.YAW_COMMAND and (sym := self.reward_manager["leg_symmetry"]).weight > 0.01:
-            self.log("relaxed legs enabled")
-            sym.weight = 0.01
 
     def _add_observation_noise(self, value: torch.Tensor, standard_deviation: float) -> torch.Tensor:
-        if self.curriculum_level < Stage.ADD_NOISE:
+        if self.curriculum_level < Stage.NOISE:
             return value
         return value + torch.randn_like(value) * standard_deviation
 
     def _curriculum_metrics(self) -> CurriculumMetrics:
         return CurriculumMetrics(
-            forward = self.reward_manager.last_episode_mean_reward("forward_velocity", before_weight=True),
-            side =    self.reward_manager.last_episode_mean_reward("side_velocity", before_weight=True),
-            yaw =     self.reward_manager.last_episode_mean_reward("yaw_velocity", before_weight=True),
-            pitch =   self.reward_manager.last_episode_mean_reward("pitch_tracking", before_weight=True),
-            roll =    self.reward_manager.last_episode_mean_reward("roll_tracking", before_weight=True),
-            height =  self.reward_manager.last_episode_mean_reward("height_tracking", before_weight=True),
+            forward  = self.reward_manager.last_episode_mean_reward("forward_velocity", before_weight=True),
+            side     = self.reward_manager.last_episode_mean_reward("side_velocity", before_weight=True),
+            yaw      = self.reward_manager.last_episode_mean_reward("yaw_velocity", before_weight=True),
+            pitch    = self.reward_manager.last_episode_mean_reward("pitch_tracking", before_weight=True),
+            roll     = self.reward_manager.last_episode_mean_reward("roll_tracking", before_weight=True),
+            height   = self.reward_manager.last_episode_mean_reward("height_tracking", before_weight=True),
             episode_length=self._last_reset_mean_ep_length,
         )
 
@@ -510,7 +511,6 @@ class PuckStandEnv(ManagedEnvironment):
 
         min_len = CURRICULUM_MIN_EPISODE_LENGTH_RATIO * (self.max_episode_length_steps or 0)
         thresholds = CurriculumMetrics(*[MIN_TRACKING_THRESHOLD] * 6, episode_length=min_len)
-        if stage < Stage.YAW_COMMAND: thresholds.yaw = 0.7 #lower standards
         track_fails = averages.tracks_baseline(thresholds)
 
         if not track_fails:
