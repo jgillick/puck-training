@@ -269,6 +269,8 @@ class PuckStandEnv(ManagedEnvironment):
         self.height_smooth = self.height_command.command[:, 0].clone()
         self.pitch_smooth = self.attitude_command.command[:, 0].clone()
         self.roll_smooth = self.attitude_command.command[:, 1].clone()
+        self.tracking_target : torch.Tensor | None = None
+        self.tracking_result : torch.Tensor | None = None
 
         def square_linear_error(error: torch.Tensor, scale: float) -> torch.Tensor:
             '''exponential reward with additial linear penalty to provide gradient pressure for large errors'''
@@ -288,30 +290,48 @@ class PuckStandEnv(ManagedEnvironment):
         def forward_velocity_tracking(env) -> torch.Tensor:
             target = self.cmd_smooth[:, 1]
             actual = self.entity_manager.get_linear_velocity()[:, 1]
+            if (stg := self.get_stage()[0]) == Stage.FORWARD or stg == Stage.FWDBACK:
+                self.tracking_target = target
+                self.tracking_result = actual
             return square_linear_error(-(actual - target), VELOCITY_TRACKING_SENSITIVITY)
 
         def side_velocity_tracking(env) -> torch.Tensor:
             target = self.cmd_smooth[:, 0]
             actual = self.entity_manager.get_linear_velocity()[:, 0]
+            if self.get_stage()[0] == Stage.SIDE:
+                self.tracking_target = target
+                self.tracking_result = actual
             return square_linear_error(actual - target, VELOCITY_TRACKING_SENSITIVITY)
 
         def yaw_velocity_tracking(env) -> torch.Tensor:
             target = self.cmd_smooth[:, 2]
             actual = self.entity_manager.get_angular_velocity()[:, 2]
+            if self.get_stage()[0] == Stage.YAW:
+                self.tracking_target = target
+                self.tracking_result = actual
             return square_linear_error(actual - target, YAW_TRACKING_SENSITIVITY)
 
         def pitch_tracking(env) -> torch.Tensor:
             body_rpy = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)
             actual = body_rpy[:, 1]
             return square_linear_error(actual - self.pitch_smooth, 0.2)
+            if self.get_stage()[0] == Stage.PITCH:
+                self.tracking_target = target
+                self.tracking_result = actual
         def roll_tracking(env) -> torch.Tensor:
             body_rpy = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)
             actual = body_rpy[:, 0]
             return square_linear_error(actual - self.roll_smooth, 0.2)
+            if self.get_stage()[0] == Stage.ROLL:
+                self.tracking_target = target
+                self.tracking_result = actual
 
         def height_tracking(env) -> torch.Tensor:
             actual = self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1])
             return torch.exp(-(actual - self.height_smooth).abs() / 0.05) # Laplace: slope doesn't vanish near 0
+            if self.get_stage()[0] == Stage.HEIGHT:
+                self.tracking_target = target
+                self.tracking_result = actual
 
         def hip_knee_symmetry_reward(env) -> torch.Tensor:
             '''Reward symmetrical hip & knee (values are inverted between l / r)'''
@@ -541,16 +561,12 @@ class PuckStandEnv(ManagedEnvironment):
         episode["Diagnostics/wheel_rpm_max"] = wheel_rpm.abs().max().item()
 
         # report command max/min values if enabled
-        target = self.cmd_smooth[:, 1] #fwd command
-        if   self.curriculum_level >= Stage.YAW_COMMAND:    target = self.cmd_smooth[:, 2]
-        elif self.curriculum_level >= Stage.SIDE_VELOCITY:  target = self.cmd_smooth[:, 0]
-        elif self.curriculum_level >= Stage.VARIABLE_HEIGHT:target = self.height_smooth
-        elif self.curriculum_level >= Stage.PITCH_CMD:      target = self.pitch_smooth
-        elif self.curriculum_level >= Stage.ROLL_CMD:       target = self.roll_smooth
-        episode["Curriculum/target max"] = target.max().item()
-        episode["Curriculum/target min"] = target.min().item()
-        episode["Curriculum/target mean"] = target.mean().item()
-        episode["Curriculum/target std"] = target.std().item()
+        if self.tracking_target is not None:
+            episode["Curriculum/target range"]= self.tracking_target.max().item() - self.tracking_target.min().item()
+            episode["Curriculum/target avg"] = self.tracking_target.mean().item()
+        if self.tracking_result is not None:
+            episode["Curriculum/result range"] = self.tracking_result.max().item() - self.tracking_result.min().item()
+            episode["Curriculum/result avg"] = self.tracking_result.mean().item()
 
         actual_height = (self.entity_manager.base_pos[:, 2] - self.terrain_manager.get_terrain_height(self.entity_manager.base_pos[:, 0], self.entity_manager.base_pos[:, 1]))
         episode["Diagnostics/height"] = actual_height.mean().item()
