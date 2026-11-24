@@ -22,7 +22,7 @@ STANDING_JOINT_POSITIONS = {
 CURRICULUM_CHECK_EVERY_STEPS = 400
 CURRICULUM_MIN_EPISODE_LENGTH_RATIO = 0.6
 MIN_TRACKING_THRESHOLD = 0.8 #threshold for tracking performance to advance curriculum
-HEIGHT_COMMAND_MINMAX = (0.1, 0.5)
+HEIGHT_COMMAND_MINMAX = (0.12, 0.5)
 HEIGHT_MID = INITIAL_ROOT_POSITION[2]
 INITIAL_FORWARD_VELOCITY = 0.3
 MAX_FORWARD_VELOCITY = 2.0 #m/s
@@ -45,7 +45,7 @@ class Stage(enum.IntEnum):
     SIDE = enum.auto()
     Max = SIDE
 
-ATTITUDE_TARGET_LIMIT = 45 * math.pi / 180 #degrees
+ATTITUDE_TARGET_LIMIT = 35 * math.pi / 180 #degrees
 CURRICULUM_SPAWN_USABLE_RATIO = 0.2
 TERRAIN_SUB_LEVELS = (
     "flat_terrain",
@@ -111,7 +111,7 @@ class PuckWheelTorqueActionManager(gf_mgrs.BaseActionManager):
 class PuckStandEnv(ManagedEnvironment):
     """Train Puck to stand and balance with position-controlled limbs."""
 
-    def __init__(self, num_envs: int, headless: bool = True, max_episode_length_sec: int = 10) -> None:
+    def __init__(self, num_envs: int, headless: bool = True, max_episode_length_sec: int = 15) -> None:
         super().__init__(
             num_envs=num_envs,
             dt=CONTROL_DT,
@@ -249,8 +249,8 @@ class PuckStandEnv(ManagedEnvironment):
             self,
             stopped_probability=0.1,
             range={
-                "lin_vel_x": (0.0, 0.0),
-                "lin_vel_y": (-INITIAL_FORWARD_VELOCITY, -INITIAL_FORWARD_VELOCITY), #start training with initial small forward velocity
+                "lin_vel_x": (INITIAL_FORWARD_VELOCITY, INITIAL_FORWARD_VELOCITY), #start training with initial small forward velocity
+                "lin_vel_y": (0.0, 0.0),
                 "ang_vel_z": (0.0, 0.0),
             },
             resample_time_sec=5.0,
@@ -259,7 +259,8 @@ class PuckStandEnv(ManagedEnvironment):
 
         self.height_command = gf_mgrs.CommandManager(self, range=HEIGHT_COMMAND_MINMAX) #fixed target at initial height
         self.attitude_command = gf_mgrs.CommandManager(
-            self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)}
+            self, range={"pitch": (0.0, 0.0), "roll": (0.0, 0.0)},
+            resample_time_sec=3.0,
         )
         self.tracking_target : torch.Tensor | None = None
         self.tracking_result : torch.Tensor | None = None
@@ -280,16 +281,16 @@ class PuckStandEnv(ManagedEnvironment):
             return torch.exp(-4.0 * (excess / tolerance).square())
 
         def forward_velocity_tracking(env) -> torch.Tensor:
-            target = self.velocity_command.command[:, 1]
-            actual = self.entity_manager.get_linear_velocity()[:, 1]
+            target = self.velocity_command.command[:, 0]
+            actual = self.entity_manager.get_linear_velocity()[:, 0] # +x
             if (stg := self.get_stage()[0]) == Stage.FORWARD or stg == Stage.FWDBACK:
                 self.tracking_target = target
                 self.tracking_result = actual
-            return square_linear_error(-(actual - target), VELOCITY_TRACKING_SENSITIVITY)
+            return square_linear_error(actual - target, VELOCITY_TRACKING_SENSITIVITY)
 
         def side_velocity_tracking(env) -> torch.Tensor:
-            target = self.velocity_command.command[:, 0]
-            actual = self.entity_manager.get_linear_velocity()[:, 0]
+            target = self.velocity_command.command[:, 1]
+            actual = self.entity_manager.get_linear_velocity()[:, 1]
             if self.get_stage()[0] == Stage.SIDE:
                 self.tracking_target = target
                 self.tracking_result = actual
@@ -304,14 +305,14 @@ class PuckStandEnv(ManagedEnvironment):
             return square_linear_error(actual - target, YAW_TRACKING_SENSITIVITY)
 
         def pitch_tracking(env) -> torch.Tensor:
-            actual = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)[:, 0]
+            actual = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)[:, 1] #y rotation
             target = self.attitude_command.get_command('pitch').reshape(-1)
             if self.get_stage()[0] == Stage.PITCH:
                 self.tracking_target = target
                 self.tracking_result = actual
             return square_linear_error(actual - target, 0.2)
         def roll_tracking(env) -> torch.Tensor:
-            actual = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)[:, 0]
+            actual = gs_util_geom.quat_to_xyz(self.entity_manager.base_quat, rpy=True)[:, 0] #x rotation
             target = self.attitude_command.get_command('roll').reshape(-1)
             if self.get_stage()[0] == Stage.ROLL:
                 self.tracking_target = target
@@ -498,11 +499,11 @@ class PuckStandEnv(ManagedEnvironment):
         # apply limits
         self.velocity_command.range = {
             "lin_vel_x": (-lim_vel_side, lim_vel_side),
-            "lin_vel_y": (-lim_vel_fwd, lim_vel_bck),
+            "lin_vel_y": (-lim_vel_bck, lim_vel_fwd),
             "ang_vel_z": (-lim_vel_yaw, lim_vel_yaw),
         }
         self.attitude_command.range = {
-            "pitch": (-lim_pitch, lim_pitch),
+            "pitch": (-lim_pitch, lim_pitch / 2), #limit pitch range facing down to ground
             "roll": (-lim_roll, lim_roll),
         }
         self.height_command.range = lim_height
