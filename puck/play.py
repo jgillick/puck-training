@@ -14,20 +14,18 @@ from pathlib import Path
 
 import genesis as gs
 import torch
-from puck.env import PuckEnv
+from env import PuckEnv
 from rsl_rl.runners import OnPolicyRunner
 
 from genesis_forge.gamepads import Gamepad
-from genesis_forge.wrappers import RslRlWrapper
-
-# Gamepad axes (SDL2 game controller layout)
-LEFT_STICK_X = 0
-LEFT_STICK_Y = 1
-RIGHT_STICK_Y = 3
+from genesis_forge.wrappers import RslRlWrapper, VideoWrapper
 
 parser = argparse.ArgumentParser(add_help=True)
 parser.add_argument("-d", "--device", type=str, default="gpu")
 parser.add_argument("-e", "--exp_name", type=str, default="puck")
+parser.add_argument(
+    "-r", "--record", action="store_true", help="Record the whole session to a video"
+)
 parser.add_argument(
     "-c",
     "--checkpoint",
@@ -36,6 +34,8 @@ parser.add_argument(
     help="e.g. model_249.pt (default: latest)",
 )
 args = parser.parse_args()
+
+THIS_DIR = Path(__file__).resolve().parent
 
 
 def get_latest_model(log_dir: Path) -> str:
@@ -52,6 +52,13 @@ def get_latest_model(log_dir: Path) -> str:
 
 
 def main():
+    # Connect to gamepad
+    print("🎮 Connecting to gamepad...")
+    gamepad = Gamepad()
+    if not gamepad.wait_for_connection(timeout=10):
+        print("Error: No gamepad found. Connect one and try again.")
+        sys.exit(1)
+
     # Processor backend (GPU or CPU)
     backend = gs.gpu
     if args.device == "cpu":
@@ -70,28 +77,28 @@ def main():
     )
 
     # Setup environment, without an episode time limit
-    env = PuckEnv(num_envs=1, headless=False, max_episode_length_s=None)
+    env = PuckEnv(num_envs=1, headless=False, max_episode_length_s=None, mode="play")
     env.build()
 
-    # Connect to gamepad
-    print("🎮 Connecting to gamepad...")
-    gamepad = Gamepad()
-    if not gamepad.wait_for_connection(timeout=10):
-        print("Error: No gamepad found. Connect one and try again.")
-        sys.exit(1)
-
     # The left stick drives and turns.
-    # The robot can't move sideways (its lin_vel_y range is 0), so the lin_vel_y
-    # mapping has no effect; it shares the turning axis.
     env.velocity_command.use_gamepad(
         gamepad,
-        lin_vel_x_axis=LEFT_STICK_Y,
-        lin_vel_y_axis=LEFT_STICK_X,
-        ang_vel_z_axis=LEFT_STICK_X,
+        lin_vel_x_axis=1,
+        ang_vel_z_axis=0,
+        lin_vel_y_axis=None,
     )
-    # The right stick's travel maps onto the height range, so a centered stick is the
-    # middle height. SDL2 reports stick Y as negative when pushed up, so it's inverted.
-    env.height_command.use_gamepad(gamepad, range_axis=RIGHT_STICK_Y, invert_axis=True)
+    # The right stick controls height
+    env.height_command.use_gamepad(gamepad, range_axis=3, invert_axis=True)
+
+    if args.record:
+        print("🎥 Recording video...")
+        env = VideoWrapper(
+            env,
+            filename="play.mp4",
+            out_dir=str(THIS_DIR),
+            step_trigger=lambda step: step == 1,
+            video_length_sec=None,
+        )
 
     print(
         "\n"
@@ -119,6 +126,7 @@ def main():
         if str(e) != "Viewer closed.":
             raise
     finally:
+        env.close()
         gamepad.stop()
 
 

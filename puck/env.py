@@ -1,12 +1,10 @@
-import math
 from dataclasses import dataclass
+from typing import Literal
 
 import genesis as gs
-import torch
-from genesis.engine.entities import RigidEntity
 from genesis.utils.geom import transform_by_quat
 
-from genesis_forge import GenesisEnv, ManagedEnvironment, terrain
+from genesis_forge import ManagedEnvironment, terrain
 from genesis_forge.managers import (
     ActuatorManager,
     CommandManager,
@@ -20,15 +18,17 @@ from genesis_forge.managers import (
     TorqueActionManager,
     VelocityCommandManager,
 )
-from genesis_forge.managers.config import MdpFn
 from genesis_forge.mdp import observations, reset, rewards, terminations
 
-# Distance from the body origin to the ground, when the legs are in the standing pose.
-STANDING_HEIGHT = 0.226
+# Distance from the body origin to the ground, when the legs are in the default pose.
+# This is a half crouch, so both legs can move up or down to reach any commanded height.
+STANDING_HEIGHT = 0.18
 
 # Drop the robot from a few millimeters up, so the wheels don't start inside the ground
 INITIAL_BODY_POSITION = (0.0, 0.0, STANDING_HEIGHT + 0.005)
 INITIAL_QUAT = (1.0, 0.0, 0.0, 0.0)
+
+EnvMode = Literal["train", "eval", "play"]
 
 
 class PuckEnv(ManagedEnvironment):
@@ -44,6 +44,7 @@ class PuckEnv(ManagedEnvironment):
         dt: float = 1 / 50,
         max_episode_length_s: int | None = 20,
         headless: bool = True,
+        mode: EnvMode = "train",
     ):
         super().__init__(
             num_envs=num_envs,
@@ -51,6 +52,7 @@ class PuckEnv(ManagedEnvironment):
             max_episode_length_sec=max_episode_length_s,
             max_episode_random_scaling=0.1,
         )
+        self.mode = mode
 
         # Construct the scene
         self.scene = gs.Scene(
@@ -124,16 +126,21 @@ class PuckEnv(ManagedEnvironment):
             entity=self.robot,
             on_reset={
                 "position": {
-                    "fn": reset.randomize_terrain_position(
-                        terrain_manager=self.terrain_manager,
-                        height_offset=INITIAL_BODY_POSITION[2],
+                    "fn": (
+                        reset.position(position=(23.0, 23.0, INITIAL_BODY_POSITION[2]))
+                        if self.mode == "play"
+                        else reset.randomize_terrain_position(
+                            terrain_manager=self.terrain_manager,
+                            height_offset=INITIAL_BODY_POSITION[2],
+                        )
                     ),
                 },
             },
         )
 
         ##
-        # Legs: position controlled around the standing pose.
+        # Legs: position controlled around a half crouch, which is roughly the
+        # middle of the height range and keeps the weight over the wheels.
         # The flexor and hip are EL05 motors (6 Nm), the knee is a Cybergear (12 Nm).
         self.leg_actuators = ActuatorManager(
             self,
@@ -141,10 +148,10 @@ class PuckEnv(ManagedEnvironment):
             default_pos={
                 "flexor_r": 0.0,
                 "flexor_l": 0.0,
-                "hip_r": math.pi / 4,
-                "hip_l": -math.pi / 4,
-                "knee_r": math.pi / 2,
-                "knee_l": -math.pi / 2,
+                "hip_r": 0.42,
+                "hip_l": -0.42,
+                "knee_r": 1.22,
+                "knee_l": -1.22,
             },
             kp=20.0,
             kv=0.5,
@@ -156,14 +163,11 @@ class PuckEnv(ManagedEnvironment):
         )
         self.leg_actions = PositionActionManager(
             self,
-            # The knees get the largest range, so they're the easiest way to change
-            # height: crouching to 0.12m moves them ~0.9 rad from the standing pose.
-            # With every joint at 0.5, the policy lowered itself by splaying the
-            # flexors and scissoring the hips instead, with the knees parked
-            # against their extension limit.
+            # The flexors get less range, so splaying the legs isn't an
+            # easy way to change height.
             scale={
                 "knee_.*": 0.5,
-                "hip_.*": 0.25,
+                "hip_.*": 0.4,
                 "flexor_.*": 0.25,
             },
             use_default_offset=True,
@@ -195,7 +199,7 @@ class PuckEnv(ManagedEnvironment):
                 "lin_vel_y": (0.0, 0.0),
                 "ang_vel_z": (-1.5, 1.5),
             },
-            stopped_probability=0.2,
+            stopped_probability=0.15,
             resample_time_sec=5.0,
             debug_visualizer=True,
             debug_visualizer_cfg={
@@ -209,7 +213,7 @@ class PuckEnv(ManagedEnvironment):
         self.height_command = CommandManager(
             self,
             range=(0.12, 0.26),
-            resample_time_sec=5.0,
+            resample_time_sec=4.0,
         )
 
         ##
@@ -224,6 +228,7 @@ class PuckEnv(ManagedEnvironment):
                     "fn": rewards.command_tracking_lin_vel(
                         vel_cmd_manager=self.velocity_command,
                         entity_manager=self.robot_manager,
+                        sensitivity=0.25,
                     ),
                 },
                 # Reward following the angular velocity command
@@ -273,15 +278,21 @@ class PuckEnv(ManagedEnvironment):
                 },
                 # Reduce large rates of change -- encourage smoother movements/actions
                 "leg_action_rate": {
-                    "weight": -0.05,
+                    "weight": -0.1,
                     "fn": rewards.action_rate_l2(action_manager=self.leg_actions),
                 },
                 # Reduce joint jitters and encourage smooth actions
                 "leg_joint_jitter": {
-                    "weight": -0.05,
+                    "weight": -0.1,
                     "fn": rewards.action_acceleration_l2(
                         action_manager=self.leg_actions
                     ),
+                },
+                # Smooth the wheel torques, so the robot doesn't overcorrect and
+                # rock back and forth to hold its speed
+                "wheel_action_rate": {
+                    "weight": -0.01,
+                    "fn": rewards.action_rate_l2(action_manager=self.wheel_actions),
                 },
                 # Penalize episodes that ended in termination
                 "terminated": {

@@ -16,7 +16,7 @@ from genesis_forge.wrappers import (
 
 parser = argparse.ArgumentParser(add_help=True)
 parser.add_argument("-n", "--num_envs", type=int, default=4096)
-parser.add_argument("-i", "--max_iterations", type=int, default=500)
+parser.add_argument("-i", "--max_iterations", type=int, default=600)
 parser.add_argument("-d", "--device", type=str, default="gpu")
 parser.add_argument("-e", "--exp_name", type=str, default="puck")
 args = parser.parse_args()
@@ -39,7 +39,12 @@ def training_cfg():
             "use_clipped_value_loss": True,
             "value_loss_coef": 1.0,
             "rnd_cfg": None,
-            "symmetry_cfg": None,
+            "symmetry_cfg": {
+                "data_augmentation_func": "symmetry:mirror_obs_actions",
+                "use_data_augmentation": True,
+                "use_mirror_loss": False,
+                "mirror_loss_coeff": 0.0,
+            },
         },
         "actor": {
             "class_name": "MLPModel",
@@ -93,7 +98,7 @@ def main():
     # Record videos in regular intervals
     env = VideoWrapper(
         env,
-        video_length_sec=10,
+        video_length_sec=12,
         out_dir=os.path.join(log_path, "videos"),
         iteration_trigger=lambda i: i % 25 == 0,
         steps_per_iteration=cfg["num_steps_per_env"],
