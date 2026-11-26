@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -7,6 +8,7 @@ from genesis.utils.geom import transform_by_quat
 from genesis_forge import ManagedEnvironment, terrain
 from genesis_forge.managers import (
     ActuatorManager,
+    AttitudeCommandManager,
     CommandManager,
     ContactManager,
     EntityManager,
@@ -35,7 +37,7 @@ class PuckEnv(ManagedEnvironment):
     """
     Two-wheeled balancing robot, with a wheel at the end of each leg,
     trained to follow forward/backward and turning velocity commands,
-    and a body height command.
+    and body height and roll commands.
     """
 
     def __init__(
@@ -127,7 +129,7 @@ class PuckEnv(ManagedEnvironment):
             on_reset={
                 "position": {
                     "fn": (
-                        reset.position(position=(23.0, 23.0, INITIAL_BODY_POSITION[2]))
+                        reset.position(position=(12.0, 24.0, INITIAL_BODY_POSITION[2]))
                         if self.mode == "play"
                         else reset.randomize_terrain_position(
                             terrain_manager=self.terrain_manager,
@@ -217,6 +219,20 @@ class PuckEnv(ManagedEnvironment):
         )
 
         ##
+        # Commanded body roll. Positive roll tips the right side down.
+        # Genesis Forge always orders the command columns (pitch, roll),
+        # symmetry.ATTITUDE_COMMAND depends on that order.
+        self.attitude_command = AttitudeCommandManager(
+            self,
+            range={
+                "pitch": (0.0, 0.0),
+                "roll": (-math.radians(45.0), math.radians(45.0)),
+            },
+            resample_time_sec=4.0,
+            level_probability=0.2,
+        )
+
+        ##
         # Rewards
         RewardManager(
             self,
@@ -229,6 +245,7 @@ class PuckEnv(ManagedEnvironment):
                         vel_cmd_manager=self.velocity_command,
                         entity_manager=self.robot_manager,
                         sensitivity=0.25,
+                        frame="heading", # adjusts for roll
                     ),
                 },
                 # Reward following the angular velocity command
@@ -237,6 +254,7 @@ class PuckEnv(ManagedEnvironment):
                     "fn": rewards.command_tracking_ang_vel(
                         vel_cmd_manager=self.velocity_command,
                         entity_manager=self.robot_manager,
+                        frame="heading", # adjusts for roll
                     ),
                 },
                 # Reward following the height command
@@ -249,10 +267,11 @@ class PuckEnv(ManagedEnvironment):
                         sensitivity=0.005,
                     ),
                 },
-                # Keep the body level
-                "flat_orientation": {
-                    "weight": -2.0,
-                    "fn": rewards.flat_orientation_l2(
+                # Hold the commanded pitch and roll.
+                "command_attitude": {
+                    "weight": 1.5,
+                    "fn": rewards.command_tracking_attitude(
+                        attitude_command=self.attitude_command,
                         entity_manager=self.robot_manager,
                     ),
                 },
@@ -260,7 +279,10 @@ class PuckEnv(ManagedEnvironment):
                 # robot down when moving to a new commanded height.
                 "lin_vel_z": {
                     "weight": -0.5,
-                    "fn": rewards.lin_vel_z_l2(entity_manager=self.robot_manager),
+                    "fn": rewards.lin_vel_z_l2(
+                        entity_manager=self.robot_manager,
+                        frame="heading",  # adjusts for roll
+                    ),
                 },
                 # Don't roll or wobble back and forth too much
                 # Encourage minimal angular velocity in the XY plane (roll and pitch)
@@ -360,6 +382,7 @@ class PuckEnv(ManagedEnvironment):
             cfg={
                 "velocity_cmd": {"fn": self.velocity_command.observation},
                 "height_cmd": {"fn": self.height_command.observation},
+                "attitude_cmd": {"fn": self.attitude_command.observation},
                 "angle_velocity": {
                     "fn": lambda env: self.robot_manager.get_angular_velocity(),
                     "scale": 0.25,

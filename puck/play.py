@@ -2,9 +2,10 @@
 Drive the trained robot around the simulator with a gamepad.
 
 Controls:
-    Left stick up/down     drive forward/backward
-    Left stick left/right  turn
-    Right stick up/down    raise/lower the body (it returns to the middle height when released)
+    Left stick up/down      drive forward/backward
+    Left stick left/right   turn
+    Right stick up/down     raise/lower the body (it returns to the middle height when released)
+    Right stick left/right  pitch the body: right tips the nose down, left tips it up
 """
 
 import argparse
@@ -77,34 +78,39 @@ def main():
     )
 
     # Setup environment, without an episode time limit
-    env = PuckEnv(num_envs=1, headless=False, max_episode_length_s=None, mode="play")
+    base_env = PuckEnv(num_envs=1, headless=False, max_episode_length_s=None, mode="play")
+    env = base_env
+    if args.record:
+        print(f"🎥 Recording video to ${str(THIS_DIR)}...")
+        env = VideoWrapper(
+            base_env,
+            filename="play.mp4",
+            out_dir=str(THIS_DIR),
+            step_trigger=lambda _: True,
+            video_length_sec=None,
+        )
     env.build()
 
     # The left stick drives and turns.
-    env.velocity_command.use_gamepad(
+    base_env.velocity_command.use_gamepad(
         gamepad,
         lin_vel_x_axis=1,
         ang_vel_z_axis=0,
         lin_vel_y_axis=None,
     )
-    # The right stick controls height
-    env.height_command.use_gamepad(gamepad, range_axis=3, invert_axis=True)
+    # The right stick up/down controls height
+    base_env.height_command.use_gamepad(gamepad, range_axis=3, invert_axis=True)
+    # The right stick left/right controls roll
+    base_env.attitude_command.use_gamepad(gamepad, roll_axis=2)
 
-    if args.record:
-        print("🎥 Recording video...")
-        env = VideoWrapper(
-            env,
-            filename="play.mp4",
-            out_dir=str(THIS_DIR),
-            step_trigger=lambda step: step == 1,
-            video_length_sec=None,
-        )
+
 
     print(
         "\n"
         "  Left stick up/down      drive forward/backward\n"
         "  Left stick left/right   turn\n"
         "  Right stick up/down     raise/lower the body\n"
+        "  Right stick left/right  roll the body\n"
     )
 
     # Load the policy

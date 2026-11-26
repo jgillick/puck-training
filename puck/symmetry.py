@@ -16,7 +16,7 @@ ANGULAR = [(0, -1), (1, 1), (2, -1)]
 
 VELOCITY_COMMAND = [(0, 1), (1, -1), (2, -1)]  # lin_vel_x, lin_vel_y, ang_vel_z
 SCALAR = [(0, 1)]
-TILT_COMMAND = [(0, -1)]  # a rotation around X
+ATTITUDE_COMMAND = [(0, 1), (1, -1)]  # (pitch, roll): pitch (around Y) is kept, roll (around X) flips
 
 # Swap legs. Order: flexor, hip, knee (right), then flexor, hip, knee (left)
 LEGS = [(3, -1), (4, -1), (5, -1), (0, -1), (1, -1), (2, -1)]
@@ -37,7 +37,7 @@ ACTIONS = _concat(LEGS, WHEELS)
 POLICY = _concat(
     VELOCITY_COMMAND,
     SCALAR,  # height command
-    TILT_COMMAND,
+    ATTITUDE_COMMAND,
     ANGULAR,  # angular velocity
     VECTOR,  # projected gravity
     LEGS,  # position
